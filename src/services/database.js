@@ -106,45 +106,18 @@ class Database {
    * @param {number} limit - Maximum number of services to return
    * @returns {Promise<Array>} - Array of service configurations
    */
-  async getAllServiceFlows(limit = 50) {
-    const tx = this.db.transaction(SERVICE_FLOWS_STORE, 'readonly')
-    const store = tx.objectStore(SERVICE_FLOWS_STORE)
-    const index = store.index('isActive')
-    
-    let cursor = await index.openCursor(IDBKeyRange.only(true))
-    const results = []
-    
-    while (cursor && results.length < limit) {
-      results.push(cursor.value)
-      cursor = await cursor.continue()
-    }
-    
-    return results
-  }
 
   /**
    * Get service flows by name (partial match)
    * @param {string} name - Service name to search for
    * @returns {Promise<Array>} - Array of matching services
    */
-  async getServiceFlowsByName(name) {
-    const allServices = await this.getAllServiceFlows()
-    const searchTerm = name.toLowerCase()
-    
-    return allServices.filter(service => 
-      service.name.toLowerCase().includes(searchTerm) ||
-      service.serviceId.toLowerCase().includes(searchTerm)
-    )
-  }
 
   /**
    * Delete service flow
    * @param {string} serviceId - Service identifier
    * @returns {Promise} - IDB request promise
    */
-  async deleteServiceFlow(serviceId) {
-    return await this.db.delete(SERVICE_FLOWS_STORE, serviceId)
-  }
 
   /**
    * Update service flow
@@ -152,99 +125,22 @@ class Database {
    * @param {Object} updates - Partial service configuration
    * @returns {Promise} - IDB request promise
    */
-  async updateServiceFlow(serviceId, updates) {
-    const existing = await this.getServiceFlow(serviceId)
-    if (!existing) {
-      throw new Error(`Service ${serviceId} not found`)
-    }
-    
-    const updatedService = {
-      ...existing,
-      ...updates,
-      updatedAt: new Date().toISOString()
-    }
-    
-    return await this.db.put(SERVICE_FLOWS_STORE, updatedService)
-  }
 
   /**
    * Import default service flows (one-time function)
    * @returns {Promise<Array>} - Array of saved service IDs
-   */
-  async importDefaultServices() {
- // In importDefaultServices:
-const defaultServices = [
-  {
-    serviceId: 'iftms',
-    name: 'Integrated Freight Management System',
-    steps: [
-      { id: 1, sessionKey: 'licenseValidated', flag: 'awaitingBusinessLicense' },
-      { id: 2, sessionKey: 'isLibreValidated', flag: 'awaitingVehicleInfo' },
-      { id: 3, sessionKey: 'isDriverValidated', flag: 'awaitingDriverInfo' },
-      { id: 4, sessionKey: 'isInsValidated', flag: 'awaitingInsuranceInfo' }
-    ],
-    initKey: 'isIftmsInit',
-    stepKey: 'currentStep',
-    validationLogic: `
-if (licenseValidated && currentStep < 2) currentStep = 2;
-if (isLibreValidated && !isInsValidated && currentStep < 3) currentStep = 3;
-if (isDriverValidated && !isInsValidated && currentStep < 4) currentStep = 4;
-    `,
-    flagLogic: `
-if (currentStep === 1) { awaitingBusinessLicense = true; awaitingVehicleInfo = false; awaitingDriverInfo = false; }
-if (currentStep === 2) { awaitingBusinessLicense = false; awaitingVehicleInfo = true; awaitingDriverInfo = false; }
-if (currentStep === 3) { awaitingBusinessLicense = false; awaitingVehicleInfo = false; awaitingDriverInfo = true; }
-if (currentStep === 4) { awaitingBusinessLicense = false; awaitingVehicleInfo = false; awaitingDriverInfo = false; }
-    `,
-    createdAt: new Date().toISOString(),
-    isActive: 1 // Store as number
-  },
-  // ... rest of services
-]
- 
-    const results = []
-    for (const service of defaultServices) {
-      try {
-        await this.saveServiceFlow(service)
-        results.push(service.serviceId)
-        console.log(`✅ Saved default service: ${service.name}`)
-      } catch (error) {
-        console.error(`❌ Failed to save service ${service.serviceId}:`, error)
-      }
-    }
-    
-    return results
-  }
+   */ 
 
   /**
    * Export all service flows as JSON
    * @returns {Promise<string>} - JSON string of all services
    */
-  async exportServiceFlows() {
-    const services = await this.getAllServiceFlows()
-    return JSON.stringify(services, null, 2)
-  }
 
   /**
    * Import service flows from JSON
    * @param {string} jsonString - JSON string of service configurations
    * @returns {Promise<Array>} - Array of imported service IDs
    */
-  async importServiceFlows(jsonString) {
-    const services = JSON.parse(jsonString)
-    const results = []
-    
-    for (const service of services) {
-      try {
-        await this.saveServiceFlow(service)
-        results.push(service.serviceId)
-      } catch (error) {
-        console.error(`Failed to import service ${service.serviceId}:`, error)
-      }
-    }
-    
-    return results
-  }
 
   // ========== EXISTING METHODS (KEPT AS IS) ==========
 
