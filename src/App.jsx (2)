@@ -1,0 +1,339 @@
+import { useState, useEffect, useRef } from 'preact/hooks'
+import { ChatUI } from './components/ChatUI.jsx'
+import { Sidebar } from './components/Sidebar.jsx'
+import { AuthModal } from './components/AuthModal.jsx'
+
+import { db } from './services/database.js'
+import { nlpProcessor } from './services/nlpProcessor.js'
+import { pdfAnalyzerF } from './services/pdfAnalyzer.js'
+import { pdfAnalyzerD } from './services/pdfAnalyzer2.js'
+import { teSsAna } from './services/tess.js'
+//import { teSsAnaC } from './services/tessC.js'
+import { auth } from './services/auth.js'
+import { pwa } from './services/pwa.js'
+import { googleSearch,initGOOGLEsearch } from './services/duck.js'
+import { useLanguage } from './utils/constants.js'
+import AuthModalX from './components/AuthModalx.jsx'
+
+export function App() {
+  
+  const [initialized, setInitialized] = useState(false)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [authModalOpen, setAuthModalOpen] = useState(false)
+  const [currentSessionId, setCurrentSessionId] = useState(null)
+  const [sessions, setSessions] = useState([])
+  const [ocrStatus, setOcrStatus] = useState('idle') // 'idle', 'loading', 'ready', 'error'
+  const [currentStep, setCurrentStep] = useState(1)
+  const [user, setUser] = useState(null)
+  const { language, setLanguage, t } = useLanguage()
+  
+  const authPollInterval = useRef(null)
+
+  useEffect(() => {
+    initializeApp()
+    loadSessions()
+    
+    
+    authPollInterval.current = setInterval(() => {
+      checkAuthState()
+    }, 1000)
+
+    return () => {
+      if (authPollInterval.current) {
+        clearInterval(authPollInterval.current)
+      }
+      // Cleanup OCR on unmount
+      if (teSsAna.destroy) teSsAna.destroy()
+    }
+  }, [])
+
+  const initializeOCR = async () => {
+    try {
+      setOcrStatus('loading')
+      console.log('🔄 Initializing Tesseract.js OCR...')
+      
+     await teSsAna.init()
+      await teSsAna.initializeTesseract()
+      console.log('✅ Tesseract.js OCR initialized')
+      setOcrStatus('ready')
+
+      
+    } catch (error) {
+      console.error('❌ OCR initialization failed:', error)
+      setOcrStatus('error')
+    }
+  }
+const initG = async ( ) => {
+  try {
+    googleSearch()
+    initGOOGLEsearch()
+    
+      console.log('✅ google search initialized')
+  } catch (error) {
+     console.error('❌ OCR initialization failed:', error)
+  }
+}
+  const initializeApp = async () => {
+    try {
+      console.log('🚀 Starting DocAnalyzer App Initialization...')
+      
+      await db.init()
+      console.log('✅ Database initialized')
+      
+      await nlpProcessor.init()
+      console.log('✅ NLP Processor initialized')
+      
+      await pdfAnalyzerF.init()
+      console.log('✅ PDF Analyzer initialized')
+     await pdfAnalyzerD.init()
+      console.log('✅ PDF AnalyzerD initialized')
+      // Initialize OCR (Tesseract.js only)
+      await initializeOCR()
+      console.log('✅ OCR initialized')
+    
+      await  googleSearch.init()
+    
+      console.log('✅ google search initialized')
+      await pwa.init()
+      console.log('✅ PWA initialized')
+      
+      if (auth && auth.init) {
+        auth.init()
+      }
+      console.log('✅ Auth initialized')
+      
+      setInitialized(true)
+      console.log('🎉 DocAnalyzer PWA initialized successfully!')
+      
+    } catch (error) {
+      console.error('💥 App initialization failed:', error)
+      setInitialized(true) // Continue even if some services fail
+    }
+  }
+  useEffect(() => {
+    // Re-initialize App when language changes
+    initializeApp()
+  }, [language])
+  const checkAuthState = () => {
+    try {
+      const savedUser = localStorage.getItem('currentUser')
+      const isAuthenticated = !!savedUser
+      const currentUser = savedUser ? JSON.parse(savedUser) : null
+      
+      updateAuthUI(isAuthenticated, currentUser)
+      
+    } catch (error) {
+      console.error('Error checking auth state:', error)
+    }
+  }
+  const handleLogin = (userData) => {
+    setUser(userData)
+    localStorage.setItem('agig-user', JSON.stringify(userData))
+    setShowAuth(false)
+  }
+  const updateAuthUI = (isAuthenticated, currentUser) => {
+    const authBtn = document.querySelector('.auth-btn')
+    if (authBtn) {
+      const authText = authBtn.querySelector('.auth-text')
+      const authIcon = authBtn.querySelector('.material-symbols-rounded')
+      
+      if (authText && authIcon) {
+        if (isAuthenticated && currentUser) {
+          authText.textContent = currentUser.name || 'My Account'
+         // authIcon.textContent = <img src="/.img/1752692028961-removebg-preview.png" alt="DocAnalyzer Logo" class="logo" />
+        } else {
+          authText.textContent = 'Sign In'
+          authIcon.textContent = 'account_circle'
+        }
+      }
+    }
+  }
+
+  const loadSessions = async () => {
+    try {
+      const history = await db.getChatHistory(200)
+      const groupedSessions = groupMessagesBySession(history)
+      setSessions(groupedSessions)
+      
+      if (groupedSessions.length > 0 && !currentSessionId) {
+        setCurrentSessionId(groupedSessions[0].sessionId)
+      }
+    } catch (error) {
+      console.error('Failed to load sessions:', error)
+    }
+  }
+
+  const groupMessagesBySession = (messages) => {
+    const sessionsMap = new Map()
+    
+    messages.forEach(message => {
+      const sessionId = message.sessionId || 'default'
+      
+      if (!sessionsMap.has(sessionId)) {
+        sessionsMap.set(sessionId, {
+          sessionId,
+          messages: [],
+          timestamp: message.timestamp,
+          preview: '',
+          messageCount: 0
+        })
+      }
+      
+      const session = sessionsMap.get(sessionId)
+      session.messages.push(message)
+      session.messageCount++
+      
+      if (new Date(message.timestamp) > new Date(session.timestamp)) {
+        session.timestamp = message.timestamp
+      }
+      
+      if (!session.preview && message.type === 'user') {
+        session.preview = message.content.substring(0, 50) + (message.content.length > 50 ? '...' : '')
+      }
+    })
+    
+    return Array.from(sessionsMap.values())
+      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+  }
+
+  const generateSessionId = () => {
+    return 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9)
+  }
+
+  const startNewChat = () => {
+    const newSessionId = generateSessionId()
+    setCurrentSessionId(newSessionId)
+    saveSessionStart(newSessionId)
+  }
+
+  const saveSessionStart = async (sessionId) => {
+    try {
+      await db.saveChatMessage({
+        type: 'system',
+        content: 'SESSION_START',
+        sessionId: sessionId,
+        timestamp: new Date().toISOString()
+      })
+      await loadSessions()
+    } catch (error) {
+      console.error('Failed to save session start:', error)
+    }
+  }
+
+  const setCurrentSession = (sessionId) => {
+    setCurrentSessionId(sessionId)
+  }
+
+  const toggleSidebar = () => {
+    setSidebarOpen(!sidebarOpen)
+  }
+
+  const closeSidebar = () => {
+    setSidebarOpen(false)
+  }
+
+  const toggleAuthModal = () => {
+    console.log('Toggle auth modal clicked')
+    setAuthModalOpen(!authModalOpen)
+  }
+
+  const handleAuthSuccess = () => {
+    console.log('Auth success, closing modal')
+    setTimeout(() => {
+      checkAuthState()
+    }, 500)
+    setAuthModalOpen(false)
+  }
+
+  if (!initialized) {
+    return (
+      <div class="loading-screen">
+        <div class="spinner"></div>
+        <p>Initializing AGS...</p>
+        {ocrStatus === 'loading' && (
+          <div class="ocr-loading">
+            <p>Loading services...</p>
+            <div class="progress-bar">
+              <div class="progress"></div>
+            </div>
+          </div>
+        )}
+        {ocrStatus === 'error' && (
+          <p class="error-text">OCR failed, using text-only mode</p>
+        )}
+      </div>
+    )
+  }
+const ufoto='.img/logo_only.png'
+  return (
+    <div class="app">
+      <header class="header-bar">
+        <div class="header-content">
+          <button class="logo-btn" onClick={toggleSidebar}>
+            <img src="/.img/1752692028961-removebg-preview.png" alt="DocAnalyzer Logo" class="logo" />
+            <span class="app-name">AGIG</span>
+          </button>
+          <div class="header-actions">
+            {/* Language Selector */}
+            <select 
+              class="language-selector" 
+              value={language}
+              onChange={(e) => setLanguage(e.target.value)}
+            >
+              <option value="en">English</option>
+              <option value="am">አማርኛ</option>
+            </select>
+            
+            <button class="auth-btn" onClick={() => {
+              if (auth.getIsAuthenticated()) {
+                auth.signOut()
+              } else {
+                toggleAuthModal()
+                setShowAuth(true)
+              }
+            }}>
+              <span class="material-symbols-rounded">
+                {auth.getIsAuthenticated() ?  <img src="/.img/1752692028961-removebg-preview.png" alt="DocAnalyzer Logo" class="logo" /> : 'accounth_circle'}
+                </span>
+              <span class="auth-text">
+                {auth.getIsAuthenticated() ? 'Sign Out' : 'Sign In'}
+              </span>
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <Sidebar 
+        isOpen={sidebarOpen} 
+        onClose={closeSidebar}
+        currentSessionId={currentSessionId}
+        onSessionChange={setCurrentSession}
+        onNewChat={startNewChat}
+        sessions={sessions}
+      />
+
+      <AuthModal 
+        isOpen={authModalOpen} 
+        onClose={toggleAuthModal}
+        onAuthSuccess={handleAuthSuccess}
+      />
+
+      <div class="container">
+        <header class="app-header">
+          <h1 class="heading">AGIG PWA</h1>
+          <h4 class="sub-heading">
+            {auth.getIsAuthenticated() ? t.welcomeMessage : t.welcomeDescription}
+          </h4>
+        </header>
+       
+      
+        <ChatUI 
+          currentSessionId={currentSessionId} 
+          onNewSession={startNewChat}
+          ocrEngine={teSsAna}
+          language={language}
+        />
+      </div>
+    </div>
+  )
+}

@@ -1,0 +1,28 @@
+{
+  "name": "agig",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  
+  "scripts": {
+    "dev": "vite --host",
+    "build": "vite build",
+    "preview": "vite preview",
+    "deploy": "npm run build && npx gh-pages -d dist -b gh-pages"
+  },
+
+  "dependencies": {
+    "compromise": "^14.15.0",
+    "highlight.js": "^11.11.1",
+    "idb": "^8.0.3",
+    "marked": "^18.0.5",
+    "pdfjs-dist": "^5.7.284",
+    "preact": "^10.19.0",
+    "tesseract.js": "^7.0.0"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.8.0",
+    "gh-pages": "^6.3.0",
+    "vite": "^5.4.0"
+  }
+}

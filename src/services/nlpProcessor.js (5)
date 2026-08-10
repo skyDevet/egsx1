@@ -1,0 +1,1165 @@
+// ============================================================
+// nlpProcessor.js - Fixed VIN handling
+// ============================================================
+
+import * as pdfjsLib from 'pdfjs-dist/build/pdf';
+import { vinDecoder } from './vindecoder.js';
+import { getServiceConfigDB } from './serviceConfigDB.js';
+
+// ============================================================
+// DEFAULT SERVICES
+// ============================================================
+
+const DEFAULT_SERVICES = {
+  iftms: {
+    id: 'iftms',
+    name: 'IFTMS - Freight Transport',
+    description: 'Register freight transport operators, vehicles, and drivers',
+    initStep: 1,
+    collectedData: { operator: {}, vehicles: [], drivers: [] },
+    steps: {
+      1: {
+        type: 'form',
+        title: 'Operator Registration',
+        fields: [
+          { name: 'businessLicenseNumber', question: 'Business License Number? (Example: 12345678)', validation: 'license', regex: /^[0-9]{6,10}$/, example: '12345678', error: 'Invalid. Use 6-10 digits.' },
+          { name: 'operatorName', question: 'Operator Name? (Example: Ethio Transport)', validation: 'text', regex: /^.+$/, example: 'Ethio Transport', error: 'Cannot be empty.' },
+          { name: 'phoneNumber', question: 'Phone Number? (Example: 0912345678)', validation: 'phone', regex: /^(09|07)[0-9]{8}$/, example: '0912345678', error: 'Invalid phone number.' }
+        ],
+        onValid: { nextStep: 2 }
+      },
+      2: {
+        type: 'subprocess',
+        title: 'Vehicle Management',
+        subprocess: {
+          itemName: 'Vehicle',
+          addPrompt: 'Add a vehicle? (yes/no)',
+          continuePrompt: 'Continue to drivers? (yes/no)',
+          fields: [
+            { name: 'plateNumber', question: 'Plate Number? (Example: AA-1234)', validation: 'plate', regex: /^[A-Z]{2,3}-?[0-9]{3,4}$/i, example: 'AA-1234', error: 'Invalid plate format.' },
+            { name: 'plateCode', question: 'Plate Code? (Example: AA)', validation: 'text', example: 'AA', error: 'Cannot be empty.' },
+            { name: 'motorNumber', question: 'Motor Number? (Example: 1SG4001234567)', validation: 'text', example: '1SG4001234567', error: 'Cannot be empty.' },
+            { name: 'vinNumber', question: 'VIN or Chassis Number? (Example: LVBS6PE123456789)', validation: 'vin', regex: /^[A-HJ-NPR-Z0-9]{10,18}$/i, example: 'LVBS6PE123456789', error: 'Invalid VIN/Chassis (10-17 characters).' },
+            { name: 'chassisNumber', question: 'Chassis Number?', validation: 'text', example: 'LVBS6PE123456789', error: 'Cannot be empty.', autoFill: true },
+            { name: 'manufacturer', question: 'Manufacturer?', validation: 'text', example: 'Toyota', error: 'Cannot be empty.', autoFill: true },
+            { name: 'vehicleModel', question: 'Vehicle Model?', validation: 'text', example: 'Toyota Hilux', error: 'Cannot be empty.', autoFill: true },
+            { name: 'manufactureYear', question: 'Year of Manufacture?', validation: 'year', regex: /^(19|20)[0-9]{2}$/, example: '2020', error: 'Invalid year (e.g., 2020).', autoFill: true },
+            { name: 'vehicleType', question: 'Vehicle Type?', validation: 'text', example: 'Truck', error: 'Cannot be empty.', autoFill: true },
+            { name: 'bodyPartType', question: 'Body Part Type?', validation: 'text', example: 'Crew Cab Truck', error: 'Cannot be empty.', autoFill: true },
+            { name: 'engineInfo', question: 'Engine Information?', validation: 'text', example: '2.8L Diesel Turbo', error: 'Cannot be empty.', autoFill: true },
+            { name: 'engineCapacity', question: 'Engine Capacity (cc)?', validation: 'number', regex: /^\d+$/, example: '2800', error: 'Please enter a number.', autoFill: true },
+            { name: 'cylinderCount', question: 'Number of Cylinders?', validation: 'number', regex: /^\d+$/, example: '4', error: 'Please enter a number.', autoFill: true },
+            { name: 'fuelType', question: 'Fuel Type?', validation: 'choice', options: ['Diesel', 'Petrol', 'Electric', 'Hybrid', 'LPG', 'CNG'], example: 'Diesel', error: 'Please select a fuel type.', autoFill: true },
+            { name: 'serviceType', question: 'Service Type?', validation: 'choice', options: ['Freight Transport', 'Passenger Transport', 'General Transport', 'Delivery Transport', 'Construction Transport', 'Liquid Transport', 'Cold Chain Transport'], example: 'Freight Transport', error: 'Please select a service type.', autoFill: true },
+            { name: 'totalWeight', question: 'Total Weight (kg)?', validation: 'number', regex: /^\d+$/, example: '3500', error: 'Please enter a number.', autoFill: true },
+            { name: 'unladenWeight', question: 'Unladen Weight (kg)?', validation: 'number', regex: /^\d+$/, example: '2500', error: 'Please enter a number.', autoFill: true },
+            { name: 'loadCapacity', question: 'Load Capacity (kg)?', validation: 'number', regex: /^\d+$/, example: '1000', error: 'Please enter a number.', autoFill: true },
+            { name: 'cargoVolume', question: 'Cargo Volume (kg)?', validation: 'number', regex: /^\d+$/, example: '5000', error: 'Please enter a number.', autoFill: true },
+            { name: 'tonnage', question: 'Tonnage (T)?', validation: 'number', regex: /^\d+\.?\d*$/, example: '3.5', error: 'Please enter a number.', autoFill: true },
+            { name: 'gvw', question: 'Gross Vehicle Weight (kg)?', validation: 'number', regex: /^\d+$/, example: '3500', error: 'Please enter a number.', autoFill: true },
+            { name: 'payload', question: 'Payload (kg)?', validation: 'number', regex: /^\d+$/, example: '1000', error: 'Please enter a number.', autoFill: true },
+            { name: 'seatingCapacity', question: 'Seating Capacity?', validation: 'number', regex: /^\d+$/, example: '5', error: 'Please enter a number.', autoFill: true },
+            { name: 'wheelbase', question: 'Wheelbase (mm)?', validation: 'number', regex: /^\d+$/, example: '3000', error: 'Please enter a number.', autoFill: true },
+            { name: 'axelCount', question: 'Axel Count?', validation: 'number', regex: /^\d+$/, example: '2', error: 'Please enter a number.', autoFill: true },
+            { name: 'color', question: 'Vehicle Color?', validation: 'text', example: 'White', error: 'Cannot be empty.', autoFill: true },
+            { name: 'bodyColor', question: 'Body Color?', validation: 'text', example: 'White', error: 'Cannot be empty.', autoFill: true },
+            { name: 'interiorColor', question: 'Interior Color?', validation: 'text', example: 'Black', error: 'Cannot be empty.', autoFill: true },
+            { name: 'assemblyPlant', question: 'Assembly Plant?', validation: 'text', example: 'China - Beijing', error: 'Cannot be empty.', autoFill: true },
+            { name: 'gpsInfo', question: 'GPS Info (lat, lon)?', validation: 'text', example: '39.9042, 116.4074', error: 'Invalid GPS format.', autoFill: true }
+          ],
+          onValid: { nextStep: 3, collectionKey: 'vehicles' }
+        }
+      },
+      3: {
+        type: 'subprocess',
+        title: 'Driver Management',
+        subprocess: {
+          itemName: 'Driver',
+          addPrompt: 'Add a driver? (yes/no)',
+          continuePrompt: 'Continue to assistant drivers? (yes/no)',
+          fields: [
+            { name: 'driverName', question: 'Driver Name? (Example: Abebe Kebede)', validation: 'text', example: 'Abebe Kebede', error: 'Cannot be empty.' },
+            { name: 'driverLicense', question: 'Driver License Number? (Example: DL123456)', validation: 'text', example: 'DL123456', error: 'Cannot be empty.' }
+          ],
+          onValid: { nextStep: 4, collectionKey: 'drivers' }
+        }
+      },
+      4: {
+        type: 'summary',
+        title: 'Registration Complete',
+        isFinal: true,
+        actions: ['Download Certificate', 'Print Summary', 'Start New Registration']
+      }
+    }
+  },
+  documentAnalysis: {
+    id: 'documentAnalysis',
+    name: 'Document Analysis',
+    description: 'Analyze research papers, legal documents, and financial statements',
+    initStep: 1,
+    collectedData: { document: null, analysisType: null },
+    steps: {
+      1: {
+        type: 'file_upload',
+        title: 'Upload Document',
+        prompt: '📄 Please upload the document you want me to analyze:',
+        onValid: { nextStep: 2 }
+      },
+      2: {
+        type: 'form',
+        title: 'Analysis Type',
+        fields: [
+          { name: 'analysisType', question: 'What type of analysis do you want? (Example: Summarize)', validation: 'choice', options: ['Summarize', 'Extract Key Points', 'Find Keywords', 'Analyze Sentiment'], example: 'Summarize', error: 'Please select an option.' }
+        ],
+        onValid: { nextStep: 3 }
+      },
+      3: {
+        type: 'result',
+        title: 'Analysis Result',
+        prompt: '✅ Analysis complete!',
+        isFinal: true,
+        actions: ['New Analysis', 'Export Results', 'Start Over']
+      }
+    }
+  },
+  videoGeneration: {
+    id: 'videoGeneration',
+    name: 'Video Generation',
+    description: 'Create video clips, slideshows, and advertisements',
+    initStep: 1,
+    collectedData: { videoType: null, duration: null },
+    steps: {
+      1: {
+        type: 'form',
+        title: 'Video Details',
+        fields: [
+          { name: 'videoType', question: 'What type of video? (Example: Slideshow)', validation: 'choice', options: ['Slideshow', 'Video Clip', 'Advertisement'], example: 'Slideshow', error: 'Please select a video type.' },
+          { name: 'duration', question: 'Duration (seconds)? (Example: 30)', validation: 'number', regex: /^\d+$/, example: '30', error: 'Please enter a number.' }
+        ],
+        onValid: { nextStep: 2 }
+      },
+      2: {
+        type: 'file_upload',
+        title: 'Upload Media',
+        prompt: '📷 Upload images or provide a script:',
+        onValid: { nextStep: 3 }
+      },
+      3: {
+        type: 'summary',
+        title: 'Video Generation Complete',
+        prompt: '✅ Your video is ready to generate!',
+        isFinal: true,
+        actions: ['Generate Video', 'Edit Script', 'Start Over']
+      }
+    }
+  }
+};
+
+// ============================================================
+// STATE
+// ============================================================
+
+let currentService = 'iftms';
+let modelWorker = null;
+let callbacks = new Map();
+let callbackId = 0;
+let workerReady = false;
+
+// In-memory services
+let services = {};
+let servicesInitialized = false;
+let db = null;
+
+const serviceStates = {};
+
+// ============================================================
+// INITIALIZE - LOAD FROM DB OR POPULATE
+// ============================================================
+
+async function initializeServices() {
+  if (servicesInitialized) return true;
+  
+  try {
+    console.log('📂 Initializing services...');
+    db = await getServiceConfigDB();
+    
+    // Try to load from DB
+    const dbConfigs = await db.getAllServiceConfigs();
+    
+    if (dbConfigs && dbConfigs.length > 0) {
+      console.log(`✅ Found ${dbConfigs.length} services in database`);
+      
+      // Convert DB configs to service format
+      for (const dbConfig of dbConfigs) {
+        if (dbConfig.isActive !== false) {
+          const service = {
+            id: dbConfig.serviceId,
+            name: dbConfig.name,
+            description: dbConfig.description,
+            initStep: dbConfig.initStep || 1,
+            collectedData: dbConfig.collectedData || {},
+            steps: dbConfig.steps || {}
+          };
+          if (service && service.id) {
+            services[service.id] = service;
+            console.log(`  ✅ Loaded: ${service.id} - ${service.name}`);
+          }
+        }
+      }
+    }
+    
+    // If DB is empty, populate with defaults
+    if (Object.keys(services).length === 0) {
+      console.log('📂 Database empty, populating with default services...');
+      
+      for (const [id, service] of Object.entries(DEFAULT_SERVICES)) {
+        // Save to DB
+        const dbConfig = {
+          id: `${id}_v1`,
+          serviceId: id,
+          name: service.name,
+          description: service.description,
+          initStep: service.initStep,
+          collectedData: service.collectedData,
+          steps: service.steps,
+          isActive: true,
+          version: 1,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        };
+        await db.saveServiceConfig(dbConfig);
+        
+        // Add to memory
+        services[id] = service;
+        console.log(`  ✅ Added default: ${id} - ${service.name}`);
+      }
+      
+      console.log('✅ Default services saved to database!');
+    }
+    
+    // Initialize states for all services
+    for (const [id, svc] of Object.entries(services)) {
+      if (!serviceStates[id]) {
+        serviceStates[id] = {
+          currentStep: svc.initStep || 1,
+          currentFieldIndex: 0,
+          waitingForAdd: false,
+          waitingForContinue: false,
+          currentItem: {},
+          collectedData: JSON.parse(JSON.stringify(svc.collectedData || {}))
+        };
+      }
+    }
+    
+    servicesInitialized = true;
+    console.log(`📚 Services initialized: ${Object.keys(services).length} available`);
+    return true;
+    
+  } catch (error) {
+    console.error('❌ Error initializing services:', error);
+    // Fallback to defaults in memory only
+    services = { ...DEFAULT_SERVICES };
+    servicesInitialized = true;
+    
+    for (const [id, svc] of Object.entries(services)) {
+      if (!serviceStates[id]) {
+        serviceStates[id] = {
+          currentStep: svc.initStep || 1,
+          currentFieldIndex: 0,
+          waitingForAdd: false,
+          waitingForContinue: false,
+          currentItem: {},
+          collectedData: JSON.parse(JSON.stringify(svc.collectedData || {}))
+        };
+      }
+    }
+    return true;
+  }
+}
+
+// ============================================================
+// GET FUNCTIONS
+// ============================================================
+
+function getState() {
+  if (!servicesInitialized) {
+    initializeServices();
+  }
+  
+  if (!serviceStates[currentService]) {
+    const svc = getService();
+    if (svc) {
+      serviceStates[currentService] = {
+        currentStep: svc.initStep || 1,
+        currentFieldIndex: 0,
+        waitingForAdd: false,
+        waitingForContinue: false,
+        currentItem: {},
+        collectedData: JSON.parse(JSON.stringify(svc.collectedData || {}))
+      };
+    } else {
+      serviceStates[currentService] = {
+        currentStep: 1,
+        currentFieldIndex: 0,
+        waitingForAdd: false,
+        waitingForContinue: false,
+        currentItem: {},
+        collectedData: {}
+      };
+    }
+  }
+  return serviceStates[currentService];
+}
+
+function getService() {
+  if (!servicesInitialized) {
+    initializeServices();
+  }
+  
+  if (!services[currentService]) {
+    const keys = Object.keys(services);
+    if (keys.length > 0) {
+      currentService = keys[0];
+    } else {
+      // Ultimate fallback
+      services = { ...DEFAULT_SERVICES };
+      currentService = 'iftms';
+    }
+  }
+  
+  return services[currentService] || DEFAULT_SERVICES.iftms;
+}
+
+function getStep() {
+  const svc = getService();
+  if (!svc || !svc.steps) {
+    console.error('Service or steps is undefined!');
+    return null;
+  }
+  const state = getState();
+  const step = svc.steps[state.currentStep];
+  if (!step) {
+    console.warn(`Step ${state.currentStep} not found, resetting to 1`);
+    state.currentStep = 1;
+    saveGlobalState();
+    return svc.steps[1] || null;
+  }
+  return step;
+}
+
+function getCurrentField() {
+  const step = getStep();
+  if (!step) return null;
+  const state = getState();
+  const fields = step.subprocess?.fields || step.fields || [];
+  return fields[state.currentFieldIndex] || null;
+}
+
+function saveGlobalState() {
+  try {
+    sessionStorage.setItem('app_state', JSON.stringify({ currentService, states: serviceStates }));
+  } catch (e) {}
+}
+
+function loadGlobalState() {
+  try {
+    const saved = sessionStorage.getItem('app_state');
+    if (saved) {
+      const data = JSON.parse(saved);
+      currentService = data.currentService || currentService;
+      for (const [id, st] of Object.entries(data.states || {})) {
+        if (serviceStates[id]) Object.assign(serviceStates[id], st);
+      }
+    }
+  } catch (e) {}
+}
+
+loadGlobalState();
+
+// ============================================================
+// KEYWORD CHECKS
+// ============================================================
+
+const SERVICE_KEYWORDS = {
+  videoGeneration: ['video', 'clip', 'slideshow', 'advertisement', 'promo', 'animation'],
+  documentAnalysis: ['analyze', 'analysis', 'research', 'document', 'paper', 'academic', 'legal', 'contract', 'financial', 'invoice'],
+  iftms: ['freight', 'transport', 'cargo', 'iftms', 'operator', 'vehicle', 'driver', 'truck', 'logistics']
+};
+
+function checkServiceSwitch(message) {
+  if (!message) return null;
+  const lower = message.toLowerCase();
+  for (const [serviceId, keywords] of Object.entries(SERVICE_KEYWORDS)) {
+    if (keywords.some(kw => lower.includes(kw.toLowerCase()))) {
+      return serviceId;
+    }
+  }
+  return null;
+}
+
+const YES_WORDS = ['yes', 'yeah', 'yep', 'sure', 'ok', 'okay', 'yup', 'of course'];
+const NO_WORDS = ['no', 'nope', 'nah', 'not yet', 'skip'];
+
+function checkYesNo(message) {
+  if (!message) return null;
+  const lower = message.trim().toLowerCase();
+  if (YES_WORDS.some(w => lower === w || lower.startsWith(w + ' '))) return 'yes';
+  if (NO_WORDS.some(w => lower === w || lower.startsWith(w + ' '))) return 'no';
+  return null;
+}
+
+// ============================================================
+// MODEL WORKER
+// ============================================================
+
+export async function initModel() {
+  if (modelWorker) return true;
+  return new Promise((resolve) => {
+    try {
+      modelWorker = new Worker(new URL('./modelWorker.js', import.meta.url), { type: 'module' });
+      modelWorker.onmessage = (e) => {
+        const { type, data, id } = e.data;
+        if (type === 'ready') { workerReady = true; resolve(true); }
+        if (type === 'response' && callbacks.has(id)) {
+          callbacks.get(id)(data);
+          callbacks.delete(id);
+        }
+        if (type === 'error') { console.error('Worker error:', e.data.error); if (!workerReady) resolve(true); }
+      };
+      modelWorker.onerror = () => resolve(true);
+      setTimeout(() => resolve(true), 5000);
+    } catch (error) {
+      resolve(true);
+    }
+  });
+}
+
+function callModel(data) {
+  return new Promise((resolve) => {
+    const id = callbackId++;
+    callbacks.set(id, resolve);
+    if (modelWorker && workerReady) {
+      modelWorker.postMessage({ type: 'predict', data, id });
+    } else {
+      const msg = data.userMessage?.toLowerCase() || '';
+      let action = 'save';
+      let value = msg;
+      
+      if (msg.includes('help') || msg.includes('what can you do')) {
+        action = 'help';
+      } else if (msg.includes('status') || msg.includes('progress')) {
+        action = 'status';
+      } else if (msg.includes('complete') || msg.includes('done') || msg.includes('finish')) {
+        action = 'complete';
+      }
+      
+      resolve({ action, value });
+    }
+    setTimeout(() => {
+      if (callbacks.has(id)) {
+        callbacks.delete(id);
+        resolve({ action: 'fallback' });
+      }
+    }, 15000);
+  });
+}
+
+// ============================================================
+// VALIDATION
+// ============================================================
+
+function validateField(input, field) {
+  const value = input?.toString().trim();
+  if (!value) return { valid: false, message: field.error || 'Cannot be empty' };
+
+  if (field.validation === 'choice' && field.options) {
+    const match = field.options.find(opt => opt.toLowerCase() === value.toLowerCase());
+    if (match) return { valid: true, value: match };
+    return { valid: false, message: `Choose from: ${field.options.join(', ')}` };
+  }
+
+  if (field.regex && !field.regex.test(value)) {
+    return { valid: false, message: field.error || `Invalid. Example: ${field.example}` };
+  }
+
+  return { valid: true, value };
+}
+
+function saveToState(fieldName, value) {
+  const state = getState();
+  const step = getStep();
+  if (!step) return;
+  if (step.type === 'form') {
+    if (!state.collectedData.operator) state.collectedData.operator = {};
+    state.collectedData.operator[fieldName] = value;
+  } else if (step.subprocess) {
+    state.currentItem[fieldName] = value;
+  }
+  saveGlobalState();
+}
+
+// ============================================================
+// VIN - FIXED WITH BETTER ERROR HANDLING
+// ============================================================
+
+function processVIN(input) {
+  try {
+    if (!input) return null;
+    
+    // Check if vinDecoder exists and has the required methods
+    if (!vinDecoder) {
+      console.warn('vinDecoder not available');
+      return null;
+    }
+    
+    // Check if it's a valid VIN
+    if (typeof vinDecoder.isVIN !== 'function') {
+      console.warn('vinDecoder.isVIN is not a function');
+      return null;
+    }
+    
+    if (!vinDecoder.isVIN(input)) {
+      return null;
+    }
+    
+    // Extract VIN
+    let vin = input;
+    if (typeof vinDecoder.extractVIN === 'function') {
+      const extracted = vinDecoder.extractVIN(input);
+      if (extracted) {
+        vin = extracted;
+      }
+    }
+    
+    vin = vin.trim().toUpperCase();
+    
+    // Get vehicle data
+    if (typeof vinDecoder.getCompleteVehicleData !== 'function') {
+      console.warn('vinDecoder.getCompleteVehicleData is not a function');
+      // Return basic VIN info
+      return {
+        vinNumber: vin,
+        manufacturer: 'Unknown',
+        vehicleModel: 'Unknown',
+        manufactureYear: 'Unknown',
+        vehicleType: 'Unknown',
+        bodyPartType: 'Unknown',
+        engineInfo: 'Unknown',
+        engineCapacity: 'Unknown',
+        cylinderCount: 'Unknown',
+        fuelType: 'Unknown',
+        serviceType: 'Unknown',
+        totalWeight: 'Unknown',
+        unladenWeight: 'Unknown',
+        loadCapacity: 'Unknown',
+        cargoVolume: 'Unknown',
+        tonnage: 'Unknown',
+        gvw: 'Unknown',
+        payload: 'Unknown',
+        seatingCapacity: 'Unknown',
+        wheelbase: 'Unknown',
+        axelCount: 'Unknown',
+        color: 'Unknown',
+        bodyColor: 'Unknown',
+        interiorColor: 'Unknown',
+        assemblyPlant: 'Unknown',
+        gpsInfo: 'Unknown'
+      };
+    }
+    
+    const data = vinDecoder.getCompleteVehicleData(vin);
+    
+    // Ensure we have a valid object
+    if (!data || typeof data !== 'object') {
+      return {
+        vinNumber: vin,
+        manufacturer: 'Unknown',
+        vehicleModel: 'Unknown',
+        manufactureYear: 'Unknown',
+        vehicleType: 'Unknown',
+        bodyPartType: 'Unknown',
+        engineInfo: 'Unknown',
+        engineCapacity: 'Unknown',
+        cylinderCount: 'Unknown',
+        fuelType: 'Unknown',
+        serviceType: 'Unknown',
+        totalWeight: 'Unknown',
+        unladenWeight: 'Unknown',
+        loadCapacity: 'Unknown',
+        cargoVolume: 'Unknown',
+        tonnage: 'Unknown',
+        gvw: 'Unknown',
+        payload: 'Unknown',
+        seatingCapacity: 'Unknown',
+        wheelbase: 'Unknown',
+        axelCount: 'Unknown',
+        color: 'Unknown',
+        bodyColor: 'Unknown',
+        interiorColor: 'Unknown',
+        assemblyPlant: 'Unknown',
+        gpsInfo: 'Unknown'
+      };
+    }
+    
+    return data;
+  } catch (error) {
+    console.error('VIN processing error:', error);
+    // Return basic info with the VIN
+    return {
+      vinNumber: input.trim().toUpperCase(),
+      manufacturer: 'Unknown',
+      vehicleModel: 'Unknown',
+      manufactureYear: 'Unknown',
+      vehicleType: 'Unknown',
+      bodyPartType: 'Unknown',
+      engineInfo: 'Unknown',
+      engineCapacity: 'Unknown',
+      cylinderCount: 'Unknown',
+      fuelType: 'Unknown',
+      serviceType: 'Unknown',
+      totalWeight: 'Unknown',
+      unladenWeight: 'Unknown',
+      loadCapacity: 'Unknown',
+      cargoVolume: 'Unknown',
+      tonnage: 'Unknown',
+      gvw: 'Unknown',
+      payload: 'Unknown',
+      seatingCapacity: 'Unknown',
+      wheelbase: 'Unknown',
+      axelCount: 'Unknown',
+      color: 'Unknown',
+      bodyColor: 'Unknown',
+      interiorColor: 'Unknown',
+      assemblyPlant: 'Unknown',
+      gpsInfo: 'Unknown'
+    };
+  }
+}
+
+function isAutoFillField(field) {
+  return field && field.autoFill === true;
+}
+
+// ============================================================
+// STEP INTRO & COMPLETE
+// ============================================================
+
+function stepIntro() {
+  const step = getStep();
+  const state = getState();
+  if (!step) return { text: 'How can I help?', html: '<div>How can I help?</div>', isStructured: true };
+
+  if (step.isFinal || step.type === 'summary' || step.type === 'result') {
+    return buildComplete();
+  }
+
+  if (step.type === 'file_upload') {
+    return { text: step.prompt, html: `<div>${step.prompt}</div>`, isStructured: true };
+  }
+
+  if (step.subprocess && step.subprocess.fields) {
+    const fields = step.subprocess.fields;
+    let firstNonAutoFillIndex = -1;
+    for (let i = 0; i < fields.length; i++) {
+      if (!isAutoFillField(fields[i])) {
+        firstNonAutoFillIndex = i;
+        break;
+      }
+    }
+    if (firstNonAutoFillIndex === -1) {
+      state.waitingForAdd = true;
+      state.currentFieldIndex = 0;
+      saveGlobalState();
+      return {
+        text: step.subprocess.addPrompt,
+        html: `<div><strong>${step.title}</strong><br>${step.subprocess.addPrompt}</div>`,
+        isStructured: true
+      };
+    }
+    state.waitingForAdd = true;
+    state.currentFieldIndex = firstNonAutoFillIndex;
+    saveGlobalState();
+    const firstField = fields[firstNonAutoFillIndex];
+    return {
+      text: firstField.question,
+      html: `<div><strong>${step.title}</strong><br>${firstField.question}</div>`,
+      isStructured: true
+    };
+  }
+
+  const firstField = step.fields?.[0];
+  if (firstField) {
+    return {
+      text: firstField.question,
+      html: `<div><strong>${step.title}</strong><br>${firstField.question}</div>`,
+      isStructured: true
+    };
+  }
+
+  return { text: step.prompt || 'How can I help?', html: `<div>${step.prompt || 'How can I help?'}</div>`, isStructured: true };
+}
+
+function buildComplete() {
+  const state = getState();
+  const svc = getService();
+  let summary = `${svc.name} Complete!\n\n`;
+  for (const [key, val] of Object.entries(state.collectedData)) {
+    if (!val) continue;
+    summary += `📋 ${key.toUpperCase()}:\n`;
+    if (Array.isArray(val)) {
+      val.forEach((item, i) => {
+        summary += `  ${i + 1}. ${Object.entries(item).map(([k, v]) => `${k}: ${v}`).join(', ')}\n`;
+      });
+    } else if (typeof val === 'object') {
+      Object.entries(val).forEach(([k, v]) => { summary += `  • ${k}: ${v}\n`; });
+    }
+  }
+  return {
+    text: summary,
+    html: `<div><pre style="white-space:pre-wrap">${summary}</pre></div>`,
+    isStructured: true,
+    isComplete: true
+  };
+}
+
+// ============================================================
+// ACTION EXECUTOR - FIXED VIN HANDLING
+// ============================================================
+
+function executeAction(action, rawValue, originalMessage) {
+  try {
+    const state = getState();
+    const step = getStep();
+    const currentField = getCurrentField();
+
+    if (!step) {
+      return { text: 'System error', html: '<div>System error</div>', isStructured: true };
+    }
+
+    if (!originalMessage || originalMessage.trim() === '') {
+      if (currentField) {
+        return { text: currentField.question, html: `<div>${currentField.question}</div>`, isStructured: true };
+      }
+      return { text: 'Please enter a value.', html: '<div>Please enter a value.</div>', isStructured: true };
+    }
+
+    switch (action) {
+      case 'save': {
+        if (!currentField) {
+          return { text: `I received: ${originalMessage}`, html: `<div>I received: ${originalMessage}</div>`, isStructured: true };
+        }
+
+        // VIN handling - FIXED
+        if (currentField.name === 'vinNumber' || currentField.name === 'chassisNumber') {
+          console.log('🔍 Processing VIN field with input:', originalMessage);
+          
+          // Try to process VIN
+          const vinResult = processVIN(originalMessage);
+          
+          if (vinResult) {
+            console.log('✅ VIN processed successfully:', vinResult);
+            
+            const fields = step.subprocess?.fields || [];
+            
+            // Save VIN number
+            saveToState('vinNumber', vinResult.vinNumber || originalMessage.trim().toUpperCase());
+            state.currentFieldIndex++;
+            
+            // Auto-fill fields
+            let autoFilledCount = 0;
+            for (const field of fields) {
+              if (isAutoFillField(field)) {
+                const fieldName = field.name;
+                const fieldValue = vinResult[fieldName];
+                
+                if (fieldValue && fieldValue !== 'Unknown' && fieldValue !== '' && fieldValue !== null && fieldValue !== undefined) {
+                  saveToState(fieldName, fieldValue);
+                  state.currentFieldIndex++;
+                  autoFilledCount++;
+                  console.log(`  ✅ Auto-filled ${fieldName}: ${fieldValue}`);
+                }
+              }
+            }
+            
+            // Skip remaining auto-fill fields
+            while (state.currentFieldIndex < fields.length && isAutoFillField(fields[state.currentFieldIndex])) {
+              state.currentFieldIndex++;
+            }
+            
+            saveGlobalState();
+            
+            // Check if we're done with all fields
+            if (state.currentFieldIndex >= fields.length) {
+              if (step.subprocess) {
+                const key = step.subprocess.onValid.collectionKey;
+                state.collectedData[key].push({ ...state.currentItem });
+                state.currentItem = {};
+                state.currentFieldIndex = 0;
+                state.waitingForAdd = true;
+                saveGlobalState();
+                
+                return {
+                  text: step.subprocess.addPrompt,
+                  html: `<div>✅ Vehicle saved! (${autoFilledCount} fields auto-filled from VIN)<br>${step.subprocess.addPrompt}</div>`,
+                  isStructured: true
+                };
+              }
+            }
+            
+            const nextField = getCurrentField();
+            return {
+              text: nextField?.question || 'Next:',
+              html: `<div>✅ VIN processed! ${autoFilledCount} fields auto-filled.<br>${nextField?.question || ''}</div>`,
+              isStructured: true
+            };
+          } else {
+            // VIN not recognized, treat as normal text
+            console.log('⚠️ Not a valid VIN, treating as regular input');
+            // Fall through to normal save
+          }
+        }
+
+        // Normal save (or VIN fallback)
+        const valueToTry = rawValue || originalMessage;
+        const validation = validateField(valueToTry, currentField);
+        
+        if (!validation.valid) {
+          return {
+            text: validation.message,
+            html: `<div class="error">❌ ${validation.message}<br>${currentField.question}</div>`,
+            isStructured: true
+          };
+        }
+        
+        saveToState(currentField.name, validation.value);
+        state.currentFieldIndex++;
+
+        const fields = step.subprocess?.fields || step.fields || [];
+        
+        // Skip auto-fill fields
+        while (state.currentFieldIndex < fields.length && isAutoFillField(fields[state.currentFieldIndex])) {
+          state.currentFieldIndex++;
+        }
+
+        if (state.currentFieldIndex >= fields.length) {
+          if (step.subprocess) {
+            if (Object.keys(state.currentItem).length > 0) {
+              const key = step.subprocess.onValid.collectionKey;
+              state.collectedData[key].push({ ...state.currentItem });
+              state.currentItem = {};
+            }
+            state.currentFieldIndex = 0;
+            state.waitingForAdd = true;
+            saveGlobalState();
+            return {
+              text: step.subprocess.addPrompt,
+              html: `<div>✅ ${step.subprocess.itemName} saved!<br>${step.subprocess.addPrompt}</div>`,
+              isStructured: true
+            };
+          } else {
+            state.currentStep = step.onValid?.nextStep || state.currentStep + 1;
+            state.currentFieldIndex = 0;
+            saveGlobalState();
+            return stepIntro();
+          }
+        }
+
+        saveGlobalState();
+        const nextField = getCurrentField();
+        return {
+          text: nextField?.question || 'Next:',
+          html: `<div>✅ Saved!<br>${nextField?.question || ''}</div>`,
+          isStructured: true
+        };
+      }
+
+      case 'yes': {
+        if (state.waitingForAdd) {
+          state.waitingForAdd = false;
+          state.currentItem = {};
+          state.currentFieldIndex = 0;
+          saveGlobalState();
+          const firstField = step.subprocess.fields[0];
+          return { text: firstField.question, html: `<div>${firstField.question}</div>`, isStructured: true };
+        }
+        if (state.waitingForContinue) {
+          state.waitingForContinue = false;
+          state.currentStep = step.subprocess.onValid.nextStep;
+          state.currentFieldIndex = 0;
+          saveGlobalState();
+          return stepIntro();
+        }
+        break;
+      }
+
+      case 'no': {
+        if (state.waitingForAdd) {
+          state.waitingForAdd = false;
+          state.waitingForContinue = true;
+          saveGlobalState();
+          return {
+            text: step.subprocess.continuePrompt,
+            html: `<div>${step.subprocess.continuePrompt}</div>`,
+            isStructured: true
+          };
+        }
+        if (state.waitingForContinue) {
+          state.waitingForContinue = false;
+          state.currentStep = step.subprocess.onValid.nextStep;
+          state.currentFieldIndex = 0;
+          saveGlobalState();
+          return stepIntro();
+        }
+        break;
+      }
+
+      case 'switch_service': {
+        const target = rawValue;
+        if (target && services[target]) {
+          currentService = target;
+          if (!serviceStates[target]) {
+            serviceStates[target] = {
+              currentStep: services[target].initStep || 1,
+              currentFieldIndex: 0,
+              waitingForAdd: false,
+              waitingForContinue: false,
+              currentItem: {},
+              collectedData: JSON.parse(JSON.stringify(services[target].collectedData || {}))
+            };
+          }
+          saveGlobalState();
+          return {
+            text: `Switched to ${services[target].name}`,
+            html: `<div>🔄 welcome to <strong>${services[target].name}</strong><br>${services[target].description}</div>`,
+            isStructured: true
+          };
+        }
+        break;
+      }
+
+      case 'help': {
+        const list = Object.values(services).map(s => `• ${s.name}: ${s.description}`).join('\n');
+        return {
+          text: `Available services:\n${list}`,
+          html: `<div>📚 Available services:<br>${list.replace(/\n/g, '<br>')}</div>`,
+          isStructured: true
+        };
+      }
+
+      case 'status': {
+        const collected = Object.entries(state.collectedData)
+          .filter(([, v]) => v && (Array.isArray(v) ? v.length > 0 : Object.keys(v).length > 0))
+          .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.length + ' item(s)' : '✓'}`)
+          .join(', ') || 'nothing yet';
+        const svc = getService();
+        return {
+          text: `Service: ${svc?.name || 'Unknown'} | Step: ${state.currentStep} | Collected: ${collected}`,
+          html: `<div>📊 <strong>${svc?.name || 'Unknown'}</strong><br>Step: ${state.currentStep}<br>Collected: ${collected}</div>`,
+          isStructured: true
+        };
+      }
+
+      case 'complete': {
+        return buildComplete();
+      }
+
+      default: {
+        return { text: `I understood: ${originalMessage}`, html: `<div>I understood: ${originalMessage}</div>`, isStructured: true };
+      }
+    }
+
+    if (currentField) {
+      return { text: currentField.question, html: `<div>${currentField.question}</div>`, isStructured: true };
+    }
+    return { text: getStep()?.prompt || 'How can I help?', html: `<div>${getStep()?.prompt || 'How can I help?'}</div>`, isStructured: true };
+  } catch (error) {
+    console.error('❌ Error in executeAction:', error);
+    return {
+      text: `Error: ${error.message || 'Unknown error'}`,
+      html: `<div class="error">❌ Error: ${error.message || 'Unknown error'}</div>`,
+      isStructured: true
+    };
+  }
+}
+
+// ============================================================
+// CORE PROCESS MESSAGE
+// ============================================================
+
+export async function processMessage(message, file) {
+  try {
+    console.log('📨 Processing:', message || '[file]');
+
+    // Initialize services
+    await initializeServices();
+    
+    await initModel();
+    loadGlobalState();
+
+    // File upload
+    if (file) {
+      const step = getStep();
+      if (step?.type === 'file_upload') {
+        const state = getState();
+        state.collectedData.document = { name: file.name, size: file.size };
+        state.currentStep = step.onValid.nextStep;
+        state.currentFieldIndex = 0;
+        saveGlobalState();
+        return {
+          text: `File "${file.name}" received. ${getStep()?.prompt || 'What next?'}`,
+          html: `<div>📄 File received: <strong>${file.name}</strong><br>${getStep()?.prompt || ''}</div>`,
+          isStructured: true
+        };
+      }
+      return { text: 'File received', html: '<div>📎 File received</div>', isStructured: false };
+    }
+
+    if (!message) return stepIntro();
+
+    // Service switch detection
+    const switchTarget = checkServiceSwitch(message);
+    if (switchTarget && switchTarget !== currentService && services[switchTarget]) {
+      currentService = switchTarget;
+      if (!serviceStates[switchTarget]) {
+        serviceStates[switchTarget] = {
+          currentStep: services[switchTarget].initStep || 1,
+          currentFieldIndex: 0,
+          waitingForAdd: false,
+          waitingForContinue: false,
+          currentItem: {},
+          collectedData: JSON.parse(JSON.stringify(services[switchTarget].collectedData || {}))
+        };
+      }
+      saveGlobalState();
+      return {
+        text: `wellcome to ${services[switchTarget].name}`,
+        html: `<div>🔄 Wellcome to <strong>${services[switchTarget].name}</strong><br>${services[switchTarget].description}</div>`,
+        isStructured: true
+      };
+    }
+
+    // Yes/No handling
+    const state = getState();
+    if (state.waitingForAdd || state.waitingForContinue) {
+      const yesno = checkYesNo(message);
+      if (yesno) {
+        return executeAction(yesno, null, message);
+      }
+    }
+
+    // VIN handling - check if the message looks like a VIN
+    const vinPattern = /^[A-HJ-NPR-Z0-9]{10,18}$/i;
+    if (message && vinPattern.test(message.trim())) {
+      console.log('🔍 Input looks like a VIN:', message);
+      const currentField = getCurrentField();
+      if (currentField && (currentField.name === 'vinNumber' || currentField.name === 'chassisNumber')) {
+        return executeAction('save', message, message);
+      }
+    }
+
+    // Check commands
+    const msgLower = message.toLowerCase();
+    if (msgLower.includes('help') || msgLower.includes('what can you do')) {
+      return executeAction('help', null, message);
+    }
+    if (msgLower.includes('status') || msgLower.includes('progress')) {
+      return executeAction('status', null, message);
+    }
+    if (msgLower.includes('complete') || msgLower.includes('done') || msgLower.includes('finish')) {
+      return executeAction('complete', null, message);
+    }
+
+    // Try AI model
+    const prediction = await callModel({
+      serviceConfig: getService(),
+      currentState: getState(),
+      userMessage: message
+    });
+
+    console.log('🤖 Prediction:', prediction);
+
+    if (prediction && prediction.action) {
+      return executeAction(prediction.action, prediction.value, message);
+    }
+
+    // Fallback - if we have a current field, try to save
+    const currentField = getCurrentField();
+    if (currentField) {
+      const validation = validateField(message, currentField);
+      if (validation.valid) {
+        return executeAction('save', validation.value, message);
+      }
+      return {
+        text: validation.message,
+        html: `<div class="error">❌ ${validation.message}<br>${currentField.question}</div>`,
+        isStructured: true
+      };
+    }
+
+    return { 
+      text: `I received: "${message}"\n\nAvailable services:\n${Object.values(services).map(s => `• ${s.name}`).join('\n')}`,
+      html: `<div>I received: "${message}"<br><br>📚 Available services:<br>${Object.values(services).map(s => `• ${s.name}`).join('<br>')}</div>`,
+      isStructured: true 
+    };
+
+  } catch (error) {
+    console.error('❌ Error:', error);
+    return {
+      text: `Error: ${error.message || 'Unknown error'}`,
+      html: `<div class="error">❌ Error: ${error.message || 'Unknown error'}</div>`,
+      isStructured: true
+    };
+  }
+}
+
+// ============================================================
+// PUBLIC API
+// ============================================================
+
+export async function chat(msg, file) {
+  try {
+    await initializeServices();
+    await initModel();
+    loadGlobalState();
+    return await processMessage(msg, file);
+  } catch (error) {
+    console.error('❌ Chat error:', error);
+    return {
+      text: `Error: ${error.message || 'Unknown error'}`,
+      html: `<div class="error">❌ Error: ${error.message || 'Unknown error'}</div>`,
+      isStructured: true
+    };
+  }
+}
+
+export async function init() {
+  try {
+    await initializeServices();
+    await initModel();
+    loadGlobalState();
+    
+    const serviceList = Object.keys(services);
+    console.log(`✅ NLP Processor initialized with ${serviceList.length} services`);
+    console.log('📚 Services:', serviceList);
+    
+    return true;
+  } catch (error) {
+    console.error('❌ Init error:', error);
+    return false;
+  }
+}
+
+export async function getAvailableServices() {
+  await initializeServices();
+  return Object.values(services);
+}
+
+export const nlpProcessor = {
+  chat,
+  processMessage,
+  init,
+  getAvailableServices
+};
+
+// Auto-init
+init().catch(console.error);

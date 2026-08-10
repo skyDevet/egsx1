@@ -1,0 +1,770 @@
+// ============================================================
+// nlpProcessor.js - No intents.js dependency
+// Works with pure Qwen2.5-0.5B modelWorker.js
+// ============================================================
+
+import * as pdfjsLib from 'pdfjs-dist/build/pdf';
+import { vinDecoder } from './vindecoder.js';
+
+// ============================================================
+// SERVICE DEFINITIONS - WITH EXAMPLES IN QUESTIONS
+// ============================================================
+const Services = {
+  iftms: {
+    id: 'iftms',
+    name: 'IFTMS - Freight Transport',
+    description: 'Register freight transport operators, vehicles, and drivers',
+    initStep: 1,
+    collectedData: { operator: {}, vehicles: [], drivers: [] },
+    steps: {
+      1: {
+        type: 'form',
+        title: 'Operator Registration',
+        fields: [
+          { name: 'businessLicenseNumber', question: 'Business License Number? (Example: 12345678)', validation: 'license', regex: /^[0-9]{6,10}$/, example: '12345678', error: 'Invalid. Use 6-10 digits.' },
+          { name: 'operatorName',          question: 'Operator Name? (Example: Ethio Transport)',           validation: 'text',    regex: /^.+$/,              example: 'Ethio Transport', error: 'Cannot be empty.' },
+          { name: 'phoneNumber',           question: 'Phone Number? (Example: 0912345678)',            validation: 'phone',   regex: /^(09|07)[0-9]{8}$/, example: '0912345678',    error: 'Invalid phone number.' }
+        ],
+        onValid: { nextStep: 2 }
+      },
+      2: {
+        type: 'subprocess',
+        title: 'Vehicle Management',
+        subprocess: {
+          itemName: 'Vehicle',
+          addPrompt: 'Add a vehicle? (yes/no)',
+          continuePrompt: 'Continue to drivers? (yes/no)',
+          fields: [
+            // USER PROVIDES
+            { name: 'plateNumber',  question: 'Plate Number? (Example: AA-1234)',   validation: 'plate', regex: /^[A-Z]{2,3}-?[0-9]{3,4}$/i, example: 'AA-1234',     error: 'Invalid plate format.' },
+            { name: 'plateCode', question: 'Plate Code? (Example: AA)', validation: 'text', example: 'AA', error: 'Cannot be empty.' },
+            { name: 'motorNumber', question: 'Motor Number? (Example: 1SG4001234567)', validation: 'text', example: '1SG4001234567', error: 'Cannot be empty.' },
+            
+            // VIN - TRIGGERS AUTO-FILL
+            { name: 'vinNumber', question: 'VIN or Chassis Number? (Example: LVBS6PE123456789)', validation: 'vin', regex: /^[A-HJ-NPR-Z0-9]{10,18}$/i, example: 'LVBS6PE123456789', error: 'Invalid VIN/Chassis (10-17 characters).' },
+            
+            // AUTO-FILLED FROM VIN - SILENT
+            { name: 'chassisNumber', question: 'Chassis Number?', validation: 'text', example: 'LVBS6PE123456789', error: 'Cannot be empty.', autoFill: true },
+            { name: 'manufacturer', question: 'Manufacturer?', validation: 'text', example: 'Toyota', error: 'Cannot be empty.', autoFill: true },
+            { name: 'vehicleModel', question: 'Vehicle Model?', validation: 'text', example: 'Toyota Hilux', error: 'Cannot be empty.', autoFill: true },
+            { name: 'manufactureYear', question: 'Year of Manufacture?', validation: 'year', regex: /^(19|20)[0-9]{2}$/, example: '2020', error: 'Invalid year (e.g., 2020).', autoFill: true },
+            { name: 'vehicleType', question: 'Vehicle Type?', validation: 'text', example: 'Truck', error: 'Cannot be empty.', autoFill: true },
+            { name: 'bodyPartType', question: 'Body Part Type?', validation: 'text', example: 'Crew Cab Truck', error: 'Cannot be empty.', autoFill: true },
+            { name: 'engineInfo', question: 'Engine Information?', validation: 'text', example: '2.8L Diesel Turbo', error: 'Cannot be empty.', autoFill: true },
+            { name: 'engineCapacity', question: 'Engine Capacity (cc)?', validation: 'number', regex: /^\d+$/, example: '2800', error: 'Please enter a number.', autoFill: true },
+            { name: 'cylinderCount', question: 'Number of Cylinders?', validation: 'number', regex: /^\d+$/, example: '4', error: 'Please enter a number.', autoFill: true },
+            { name: 'fuelType', question: 'Fuel Type?', validation: 'choice', options: ['Diesel', 'Petrol', 'Electric', 'Hybrid', 'LPG', 'CNG'], example: 'Diesel', error: 'Please select a fuel type.', autoFill: true },
+            { name: 'serviceType', question: 'Service Type?', validation: 'choice', options: ['Freight Transport', 'Passenger Transport', 'General Transport', 'Delivery Transport', 'Construction Transport', 'Liquid Transport', 'Cold Chain Transport'], example: 'Freight Transport', error: 'Please select a service type.', autoFill: true },
+            { name: 'totalWeight', question: 'Total Weight (kg)?', validation: 'number', regex: /^\d+$/, example: '3500', error: 'Please enter a number.', autoFill: true },
+            { name: 'unladenWeight', question: 'Unladen Weight (kg)?', validation: 'number', regex: /^\d+$/, example: '2500', error: 'Please enter a number.', autoFill: true },
+            { name: 'loadCapacity', question: 'Load Capacity (kg)?', validation: 'number', regex: /^\d+$/, example: '1000', error: 'Please enter a number.', autoFill: true },
+            { name: 'cargoVolume', question: 'Cargo Volume (kg)?', validation: 'number', regex: /^\d+$/, example: '5000', error: 'Please enter a number.', autoFill: true },
+            { name: 'tonnage', question: 'Tonnage (T)?', validation: 'number', regex: /^\d+\.?\d*$/, example: '3.5', error: 'Please enter a number.', autoFill: true },
+            { name: 'gvw', question: 'Gross Vehicle Weight (kg)?', validation: 'number', regex: /^\d+$/, example: '3500', error: 'Please enter a number.', autoFill: true },
+            { name: 'payload', question: 'Payload (kg)?', validation: 'number', regex: /^\d+$/, example: '1000', error: 'Please enter a number.', autoFill: true },
+            { name: 'seatingCapacity', question: 'Seating Capacity?', validation: 'number', regex: /^\d+$/, example: '5', error: 'Please enter a number.', autoFill: true },
+            { name: 'wheelbase', question: 'Wheelbase (mm)?', validation: 'number', regex: /^\d+$/, example: '3000', error: 'Please enter a number.', autoFill: true },
+            { name: 'axelCount', question: 'Axel Count?', validation: 'number', regex: /^\d+$/, example: '2', error: 'Please enter a number.', autoFill: true },
+            { name: 'color', question: 'Vehicle Color?', validation: 'text', example: 'White', error: 'Cannot be empty.', autoFill: true },
+            { name: 'bodyColor', question: 'Body Color?', validation: 'text', example: 'White', error: 'Cannot be empty.', autoFill: true },
+            { name: 'interiorColor', question: 'Interior Color?', validation: 'text', example: 'Black', error: 'Cannot be empty.', autoFill: true },
+            { name: 'assemblyPlant', question: 'Assembly Plant?', validation: 'text', example: 'China - Beijing', error: 'Cannot be empty.', autoFill: true },
+            { name: 'gpsInfo', question: 'GPS Info (lat, lon)?', validation: 'text', example: '39.9042, 116.4074', error: 'Invalid GPS format.', autoFill: true }
+          ],
+          onValid: { nextStep: 3, collectionKey: 'vehicles' }
+        }
+      },
+      3: {
+        type: 'subprocess',
+        title: 'Driver Management',
+        subprocess: {
+          itemName: 'Driver',
+          addPrompt: 'Add a driver? (yes/no)',
+          continuePrompt: 'Continue to assistant drivers? (yes/no)',
+          fields: [
+            { name: 'driverName',    question: 'Driver Name? (Example: Abebe Kebede)',           validation: 'text', example: 'Abebe Kebede', error: 'Cannot be empty.' },
+            { name: 'driverLicense', question: 'Driver License Number? (Example: DL123456)', validation: 'text', example: 'DL123456',     error: 'Cannot be empty.' }
+          ],
+          onValid: { nextStep: 4, collectionKey: 'drivers' }
+        }
+      },
+      4: {
+        type: 'summary',
+        title: 'Registration Complete',
+        isFinal: true,
+        actions: ['Download Certificate', 'Print Summary', 'Start New Registration']
+      }
+    }
+  },
+
+  documentAnalysis: {
+    id: 'documentAnalysis',
+    name: 'Document Analysis',
+    description: 'Analyze research papers, legal documents, and financial statements',
+    initStep: 1,
+    collectedData: { document: null, analysisType: null },
+    steps: {
+      1: {
+        type: 'file_upload',
+        title: 'Upload Document',
+        prompt: '📄 Please upload the document you want me to analyze:',
+        onValid: { nextStep: 2 }
+      },
+      2: {
+        type: 'form',
+        title: 'Analysis Type',
+        fields: [
+          { name: 'analysisType', question: 'What type of analysis do you want? (Example: Summarize)', validation: 'choice', options: ['Summarize', 'Extract Key Points', 'Find Keywords', 'Analyze Sentiment'], example: 'Summarize', error: 'Please select an option.' }
+        ],
+        onValid: { nextStep: 3 }
+      },
+      3: {
+        type: 'result',
+        title: 'Analysis Result',
+        prompt: '✅ Analysis complete!',
+        isFinal: true,
+        actions: ['New Analysis', 'Export Results', 'Start Over']
+      }
+    }
+  },
+
+  videoGeneration: {
+    id: 'videoGeneration',
+    name: 'Video Generation',
+    description: 'Create video clips, slideshows, and advertisements',
+    initStep: 1,
+    collectedData: { videoType: null, duration: null },
+    steps: {
+      1: {
+        type: 'form',
+        title: 'Video Details',
+        fields: [
+          { name: 'videoType', question: 'What type of video? (Example: Slideshow)',    validation: 'choice', options: ['Slideshow', 'Video Clip', 'Advertisement'], example: 'Slideshow', error: 'Please select a video type.' },
+          { name: 'duration',  question: 'Duration (seconds)? (Example: 30)',    validation: 'number', regex: /^\d+$/, example: '30', error: 'Please enter a number.' }
+        ],
+        onValid: { nextStep: 2 }
+      },
+      2: {
+        type: 'file_upload',
+        title: 'Upload Media',
+        prompt: '📷 Upload images or provide a script:',
+        onValid: { nextStep: 3 }
+      },
+      3: {
+        type: 'summary',
+        title: 'Video Generation Complete',
+        prompt: '✅ Your video is ready to generate!',
+        isFinal: true,
+        actions: ['Generate Video', 'Edit Script', 'Start Over']
+      }
+    }
+  }
+};
+
+// ============================================================
+// FAST SERVICE-SWITCH KEYWORD CHECK
+// ============================================================
+const SERVICE_KEYWORDS = {
+  videoGeneration:  ['video', 'clip', 'slideshow', 'advertisement', 'promo', 'animation', 'ቪዲዮ', 'ክሊፕ', 'ስላይድ', 'ማስታወቂያ'],
+  documentAnalysis: ['analyze', 'analysis', 'research', 'document', 'paper', 'academic', 'legal', 'contract', 'financial', 'invoice', 'ትንተና', 'ጥናት', 'ሰነድ'],
+  iftms:            ['freight', 'transport', 'cargo', 'iftms', 'operator', 'vehicle', 'driver', 'truck', 'logistics', 'ጭነት', 'ትራንስፖርት']
+};
+
+function checkServiceSwitch(message) {
+  if (!message) return null;
+  const lower = message.toLowerCase();
+  for (const [serviceId, keywords] of Object.entries(SERVICE_KEYWORDS)) {
+    if (keywords.some(kw => lower.includes(kw.toLowerCase()))) {
+      return serviceId;
+    }
+  }
+  return null;
+}
+
+// ============================================================
+// FAST YES/NO CHECK
+// ============================================================
+const YES_WORDS = ['yes', 'yeah', 'yep', 'sure', 'ok', 'okay', 'yup', 'of course', 'አዎ', 'እሺ', 'ይሁን'];
+const NO_WORDS  = ['no', 'nope', 'nah', 'not yet', 'skip', 'አይ', 'አይደለም', 'አልሆነም'];
+
+function checkYesNo(message) {
+  if (!message) return null;
+  const lower = message.trim().toLowerCase();
+  if (YES_WORDS.some(w => lower === w || lower.startsWith(w + ' '))) return 'yes';
+  if (NO_WORDS.some(w => lower === w || lower.startsWith(w + ' '))) return 'no';
+  return null;
+}
+
+// ============================================================
+// STATE
+// ============================================================
+let currentService = 'iftms';
+let modelWorker    = null;
+let callbacks      = new Map();
+let callbackId     = 0;
+let workerReady    = false;
+
+const serviceStates = {};
+for (const [id, svc] of Object.entries(Services)) {
+  serviceStates[id] = {
+    currentStep:       svc.initStep || 1,
+    currentFieldIndex: 0,
+    waitingForAdd:     false,
+    waitingForContinue: false,
+    currentItem:       {},
+    collectedData:     JSON.parse(JSON.stringify(svc.collectedData || {}))
+  };
+}
+
+function getState()   { return serviceStates[currentService]; }
+function getService() { return Services[currentService]; }
+function getStep()    { return getService().steps[getState().currentStep]; }
+
+function getCurrentField() {
+  const step  = getStep();
+  const state = getState();
+  if (!step) return null;
+  const fields = step.subprocess?.fields || step.fields || [];
+  return fields[state.currentFieldIndex] || null;
+}
+
+function saveGlobalState() {
+  try {
+    sessionStorage.setItem('app_state', JSON.stringify({ currentService, states: serviceStates }));
+  } catch(e) {}
+}
+
+function loadGlobalState() {
+  try {
+    const saved = sessionStorage.getItem('app_state');
+    if (saved) {
+      const data = JSON.parse(saved);
+      currentService = data.currentService || currentService;
+      for (const [id, st] of Object.entries(data.states || {})) {
+        if (serviceStates[id]) Object.assign(serviceStates[id], st);
+      }
+    }
+  } catch(e) {}
+}
+loadGlobalState();
+
+// ============================================================
+// MODEL WORKER
+// ============================================================
+export async function initModel() {
+  if (modelWorker) return true;
+  return new Promise((resolve) => {
+    modelWorker = new Worker(new URL('./modelWorker.js', import.meta.url), { type: 'module' });
+
+    modelWorker.onmessage = (e) => {
+      const { type, data, id } = e.data;
+      if (type === 'ready') {
+        workerReady = true;
+        resolve(true);
+      }
+      if (type === 'response' && callbacks.has(id)) {
+        callbacks.get(id)(data);
+        callbacks.delete(id);
+      }
+      if (type === 'error') {
+        console.error('Worker error:', e.data.error);
+        if (!workerReady) resolve(true);
+      }
+    };
+
+    setTimeout(() => resolve(true), 5000);
+  });
+}
+
+function callModel(data) {
+  return new Promise((resolve) => {
+    const id = callbackId++;
+    callbacks.set(id, resolve);
+    if (modelWorker && workerReady) {
+      modelWorker.postMessage({ type: 'predict', data, id });
+    } else {
+      resolve({ action: 'fallback', error: 'Model not ready' });
+    }
+    setTimeout(() => {
+      if (callbacks.has(id)) {
+        callbacks.delete(id);
+        resolve({ action: 'fallback', error: 'Model timeout' });
+      }
+    }, 15000);
+  });
+}
+
+// ============================================================
+// FIELD VALIDATION
+// ============================================================
+function validateField(input, field) {
+  const value = input?.toString().trim();
+  if (!value) return { valid: false, message: field.error || 'Cannot be empty' };
+
+  if (field.validation === 'choice' && field.options) {
+    const match = field.options.find(opt => opt.toLowerCase() === value.toLowerCase());
+    if (match) return { valid: true, value: match };
+    return { valid: false, message: `Choose from: ${field.options.join(', ')}` };
+  }
+
+  if (field.regex && !field.regex.test(value)) {
+    return { valid: false, message: field.error || `Invalid. Example: ${field.example}` };
+  }
+
+  return { valid: true, value };
+}
+
+function saveToState(fieldName, value) {
+  const state = getState();
+  const step  = getStep();
+  if (step.type === 'form') {
+    if (!state.collectedData.operator) state.collectedData.operator = {};
+    state.collectedData.operator[fieldName] = value;
+  } else if (step.subprocess) {
+    state.currentItem[fieldName] = value;
+  }
+  saveGlobalState();
+}
+
+// ============================================================
+// VIN PROCESSING
+// ============================================================
+function processVIN(input) {
+  try {
+    if (!input) return null;
+    if (!vinDecoder.isVIN(input)) return null;
+    const vin = vinDecoder.extractVIN(input) || input.trim().toUpperCase();
+    return vinDecoder.getCompleteVehicleData(vin);
+  } catch (error) {
+    console.error('VIN processing error:', error);
+    return null;
+  }
+}
+
+function isAutoFillField(field) {
+  return field.autoFill === true;
+}
+
+// ============================================================
+// STEP INTRO
+// ============================================================
+function stepIntro() {
+  const step  = getStep();
+  const state = getState();
+
+  if (!step) {
+    return buildComplete();
+  }
+
+  if (step.isFinal || step.type === 'summary' || step.type === 'result') {
+    return buildComplete();
+  }
+
+  if (step.type === 'file_upload') {
+    return { text: step.prompt, html: `<div>${step.prompt}</div>`, isStructured: true };
+  }
+
+  if (step.subprocess) {
+    const fields = step.subprocess.fields;
+    let firstNonAutoFillIndex = -1;
+    for (let i = 0; i < fields.length; i++) {
+      if (!isAutoFillField(fields[i])) {
+        firstNonAutoFillIndex = i;
+        break;
+      }
+    }
+    
+    if (firstNonAutoFillIndex === -1) {
+      state.waitingForAdd = true;
+      state.currentFieldIndex = 0;
+      saveGlobalState();
+      return {
+        text: step.subprocess.addPrompt,
+        html: `<div><strong>${step.title}</strong><br>${step.subprocess.addPrompt}</div>`,
+        isStructured: true
+      };
+    }
+    
+    state.waitingForAdd = true;
+    state.currentFieldIndex = firstNonAutoFillIndex;
+    saveGlobalState();
+    
+    const firstField = fields[firstNonAutoFillIndex];
+    return {
+      text: firstField.question,
+      html: `<div><strong>${step.title}</strong><br>${firstField.question}</div>`,
+      isStructured: true
+    };
+  }
+
+  const firstField = step.fields?.[0];
+  if (firstField) {
+    return {
+      text: firstField.question,
+      html: `<div><strong>${step.title}</strong><br>${firstField.question}</div>`,
+      isStructured: true
+    };
+  }
+
+  return { text: step.prompt || 'How can I help?', html: `<div>${step.prompt || 'How can I help?'}</div>`, isStructured: true };
+}
+
+function buildComplete() {
+  const state = getState();
+  let summary = `${getService().name} Complete!\n\n`;
+  for (const [key, val] of Object.entries(state.collectedData)) {
+    if (!val) continue;
+    summary += `📋 ${key.toUpperCase()}:\n`;
+    if (Array.isArray(val)) {
+      val.forEach((item, i) => {
+        summary += `  ${i + 1}. ${Object.entries(item).map(([k, v]) => `${k}: ${v}`).join(', ')}\n`;
+      });
+    } else if (typeof val === 'object') {
+      Object.entries(val).forEach(([k, v]) => { summary += `  • ${k}: ${v}\n`; });
+    }
+  }
+  return {
+    text: summary,
+    html: `<div><pre style="white-space:pre-wrap">${summary}</pre></div>`,
+    isStructured: true,
+    isComplete: true
+  };
+}
+
+// ============================================================
+// ACTION EXECUTOR - SILENT VIN AUTO-FILL (NO DISPLAY)
+// ============================================================
+function executeAction(action, rawValue, originalMessage) {
+  const state = getState();
+  const step  = getStep();
+  const currentField = getCurrentField();
+
+  // If no message and not a special action, just re-ask
+  if (!originalMessage || originalMessage.trim() === '') {
+    if (currentField) {
+      return {
+        text: currentField.question,
+        html: `<div>${currentField.question}</div>`,
+        isStructured: true
+      };
+    }
+    return { text: 'Please enter a value.', html: '<div>Please enter a value.</div>', isStructured: true };
+  }
+
+  switch (action) {
+    // ---- SAVE field value ----
+    case 'save': {
+      if (!currentField) break;
+      
+      // ---- VIN FIELD - SILENT AUTO-FILL (NO DISPLAY) ----
+      if (currentField.name === 'vinNumber' || currentField.name === 'chassisNumber') {
+        const vinResult = processVIN(originalMessage);
+        if (vinResult) {
+          // ONLY LOG TO CONSOLE - NOT SHOWN IN CHAT
+          console.log('🔍 VIN Decoded:', vinResult);
+          
+          const fields = step.subprocess?.fields || [];
+          
+          saveToState('vinNumber', vinResult.vinNumber);
+          state.currentFieldIndex++;
+          
+          for (const field of fields) {
+            if (isAutoFillField(field) && vinResult[field.name] && vinResult[field.name] !== 'Unknown' && vinResult[field.name] !== '') {
+              saveToState(field.name, vinResult[field.name]);
+              state.currentFieldIndex++;
+            }
+          }
+          
+          while (state.currentFieldIndex < fields.length && isAutoFillField(fields[state.currentFieldIndex])) {
+            state.currentFieldIndex++;
+          }
+          
+          saveGlobalState();
+          
+          if (state.currentFieldIndex >= fields.length) {
+            if (step.subprocess) {
+              const key = step.subprocess.onValid.collectionKey;
+              state.collectedData[key].push({ ...state.currentItem });
+              state.currentItem = {};
+              state.currentFieldIndex = 0;
+              state.waitingForAdd = true;
+              saveGlobalState();
+              
+              // SIMPLE MESSAGE - NO VIN DETAILS
+              return {
+                text: step.subprocess.addPrompt,
+                html: `<div>✅ Vehicle saved!<br>${step.subprocess.addPrompt}</div>`,
+                isStructured: true
+              };
+            }
+          }
+          
+          const nextField = getCurrentField();
+          // SIMPLE NEXT QUESTION - NO VIN DETAILS
+          return {
+            text: nextField?.question || 'Next:',
+            html: `<div>${nextField?.question || ''}</div>`,
+            isStructured: true
+          };
+        }
+      }
+      
+      // ---- NORMAL FIELD SAVE ----
+      const valueToTry = rawValue || originalMessage;
+      const validation = validateField(valueToTry, currentField);
+      if (!validation.valid) {
+        return {
+          text: validation.message,
+          html: `<div class="error">❌ ${validation.message}<br>${currentField.question}</div>`,
+          isStructured: true
+        };
+      }
+      saveToState(currentField.name, validation.value);
+      state.currentFieldIndex++;
+
+      const fields = step.subprocess?.fields || step.fields || [];
+      
+      while (state.currentFieldIndex < fields.length && isAutoFillField(fields[state.currentFieldIndex])) {
+        state.currentFieldIndex++;
+      }
+      
+      if (state.currentFieldIndex >= fields.length) {
+        if (step.subprocess) {
+          if (Object.keys(state.currentItem).length > 0) {
+            const key = step.subprocess.onValid.collectionKey;
+            state.collectedData[key].push({ ...state.currentItem });
+            state.currentItem = {};
+          }
+          state.currentFieldIndex = 0;
+          state.waitingForAdd = true;
+          saveGlobalState();
+          return {
+            text: step.subprocess.addPrompt,
+            html: `<div>✅ ${step.subprocess.itemName} saved!<br>${step.subprocess.addPrompt}</div>`,
+            isStructured: true
+          };
+        } else {
+          state.currentStep = step.onValid?.nextStep || state.currentStep + 1;
+          state.currentFieldIndex = 0;
+          saveGlobalState();
+          return stepIntro();
+        }
+      }
+
+      saveGlobalState();
+      const nextField = getCurrentField();
+      return {
+        text: nextField?.question || 'Next:',
+        html: `<div>✅ Saved!<br>${nextField?.question || ''}</div>`,
+        isStructured: true
+      };
+    }
+
+    // ---- YES (affirmative) ----
+    case 'yes': {
+      if (state.waitingForAdd) {
+        state.waitingForAdd = false;
+        state.currentItem = {};
+        state.currentFieldIndex = 0;
+        saveGlobalState();
+        const firstField = step.subprocess.fields[0];
+        return {
+          text: firstField.question,
+          html: `<div>${firstField.question}</div>`,
+          isStructured: true
+        };
+      }
+      if (state.waitingForContinue) {
+        state.waitingForContinue = false;
+        state.currentStep = step.subprocess.onValid.nextStep;
+        state.currentFieldIndex = 0;
+        saveGlobalState();
+        return stepIntro();
+      }
+      break;
+    }
+
+    // ---- NO (negative) ----
+    case 'no': {
+      if (state.waitingForAdd) {
+        state.waitingForAdd = false;
+        state.waitingForContinue = true;
+        saveGlobalState();
+        return {
+          text: step.subprocess.continuePrompt,
+          html: `<div>${step.subprocess.continuePrompt}</div>`,
+          isStructured: true
+        };
+      }
+      if (state.waitingForContinue) {
+        state.waitingForContinue = false;
+        state.currentStep = step.subprocess.onValid.nextStep;
+        state.currentFieldIndex = 0;
+        saveGlobalState();
+        return stepIntro();
+      }
+      break;
+    }
+
+    // ---- SWITCH SERVICE ----
+    case 'switch_service': {
+      const target = rawValue;
+      if (target && Services[target]) {
+        currentService = target;
+        saveGlobalState();
+        return {
+          text: `Switched to ${Services[target].name}`,
+          html: `<div>🔄 Switched to <strong>${Services[target].name}</strong><br>${Services[target].description}</div>`,
+          isStructured: true
+        };
+      }
+      break;
+    }
+
+    // ---- HELP ----
+    case 'help': {
+      const list = Object.values(Services).map(s => `• ${s.name}: ${s.description}`).join('\n');
+      return {
+        text: `Available services:\n${list}`,
+        html: `<div>📚 Available services:<br>${list.replace(/\n/g, '<br>')}</div>`,
+        isStructured: true
+      };
+    }
+
+    // ---- STATUS ----
+    case 'status': {
+      const collected = Object.entries(state.collectedData)
+        .filter(([, v]) => v && (Array.isArray(v) ? v.length > 0 : Object.keys(v).length > 0))
+        .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.length + ' item(s)' : '✓'}`)
+        .join(', ') || 'nothing yet';
+      return {
+        text: `Service: ${getService().name} | Step: ${state.currentStep} | Collected: ${collected}`,
+        html: `<div>📊 <strong>${getService().name}</strong><br>Step: ${state.currentStep}<br>Collected: ${collected}</div>`,
+        isStructured: true
+      };
+    }
+
+    // ---- COMPLETE ----
+    case 'complete': {
+      return buildComplete();
+    }
+  }
+
+  // Fallthrough
+  if (currentField) {
+    return {
+      text: currentField.question,
+      html: `<div>${currentField.question}</div>`,
+      isStructured: true
+    };
+  }
+  return { text: getStep()?.prompt || 'How can I help?', html: `<div>${getStep()?.prompt || 'How can I help?'}</div>`, isStructured: true };
+}
+
+// ============================================================
+// CORE: processMessage
+// ============================================================
+export async function processMessage(message, file) {
+  await initModel();
+
+  // ---- File upload ----
+  if (file) {
+    const step = getStep();
+    if (step?.type === 'file_upload') {
+      const state = getState();
+      state.collectedData.document = { name: file.name, size: file.size };
+      state.currentStep = step.onValid.nextStep;
+      state.currentFieldIndex = 0;
+      saveGlobalState();
+      return {
+        text: `File "${file.name}" received. ${getStep()?.prompt || 'What next?'}`,
+        html: `<div>📄 File received: <strong>${file.name}</strong><br>${getStep()?.prompt || ''}</div>`,
+        isStructured: true
+      };
+    }
+    return { text: 'File received', html: '<div>📎 File received</div>', isStructured: false };
+  }
+
+  if (!message) return stepIntro();
+
+  if (!message || message.trim() === '') {
+    return stepIntro();
+  }
+
+  // ---- Fast service-switch check ----
+  const switchTarget = checkServiceSwitch(message);
+  if (switchTarget && switchTarget !== currentService) {
+    currentService = switchTarget;
+    saveGlobalState();
+    return {
+      text: `Switched to ${Services[switchTarget].name}`,
+      html: `<div>🔄 Switched to <strong>${Services[switchTarget].name}</strong><br>${Services[switchTarget].description}</div>`,
+      isStructured: true
+    };
+  }
+
+  // ---- Fast yes/no check ----
+  const state = getState();
+  if (state.waitingForAdd || state.waitingForContinue) {
+    const yesno = checkYesNo(message);
+    if (yesno) {
+      return executeAction(yesno, null, message);
+    }
+  }
+
+  // ---- Check for VIN - SILENT ----
+  if (message && vinDecoder.isVIN(message)) {
+    const vinResult = processVIN(message);
+    if (vinResult) {
+      const step = getStep();
+      if (step.subprocess) {
+        const currentField = getCurrentField();
+        if (currentField && (currentField.name === 'vinNumber' || currentField.name === 'chassisNumber')) {
+          return executeAction('save', message, message);
+        }
+      }
+    }
+  }
+
+  // ---- Ask Qwen ----
+  const prediction = await callModel({
+    serviceConfig: getService(),
+    currentState:  getState(),
+    userMessage:   message
+  });
+
+  console.log('🤖 Qwen prediction:', prediction);
+
+  if (!prediction || prediction.action === 'fallback') {
+    const currentField = getCurrentField();
+    if (currentField) {
+      const validation = validateField(message, currentField);
+      if (validation.valid) {
+        return executeAction('save', validation.value, message);
+      }
+      return {
+        text: validation.message,
+        html: `<div class="error">❌ ${validation.message}<br>${currentField.question}</div>`,
+        isStructured: true
+      };
+    }
+    return { text: getStep()?.prompt || 'How can I help?', html: `<div>${getStep()?.prompt || 'How can I help?'}</div>`, isStructured: true };
+  }
+
+  return executeAction(prediction.action, prediction.value || prediction.service, message);
+}
+
+// ============================================================
+// PUBLIC API
+// ============================================================
+export async function chat(msg, file) {
+  await initModel();
+  return processMessage(msg, file);
+}
+
+export async function init() {
+  await initModel();
+  return true;
+}
+
+export const nlpProcessor = { chat, processMessage, init };
