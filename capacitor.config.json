@@ -1,0 +1,78 @@
+{
+  "appId": "com.skynet.egs",
+  "appName": "egs",
+  "webDir": "dist",
+  "server": {
+    "url": "https://sky.net.et/egsx1",
+    "cleartext": true
+  },
+  "plugins": {
+    "Filesystem": {
+      "androidPermissions": [
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ]
+    },
+    "CapacitorUpdater": {
+      "appId": "com.skynet.egs",
+      "version": "0.0.0",
+      "autoUpdate": true,
+      "directUpdate": "always",
+      "autoSplashscreen": true,
+      "publicKey": "-----BEGIN RSA PUBLIC KEY-----\nMIIBCgKCAQEAl8r3uNNrC/fp9gUiLyUjfz4+zh5I00uGs0ssq+8IgxVbHq54mkfw\nyJbmhm9/SettmWw1qkGUaYVtl8OB5rAt8zR5+rPcyKUhCudsu3Y1wibdWZHVBhkE\nUY9VKMaeXU58M51zeMBdgfzP6YVumijR5rYIUGES7tOaT4pr5HWJWndoeNtW6yKI\n7wyhHCen0zNs2uhKOktaRhY8yCfFInCBKtpxNshp3Mk9lhaDnyV7gbGfMYhgU00+\nLzQNfOqfTELLp+WfQ8uq0YUpUyYDLdN928a5VcifPHPboamFaUdj+g7/Yz2P3Uwz\nLuviEAfLU+mfx3XtT9sQ5Y6dKvybuP0bOQIDAQAB\n-----END RSA PUBLIC KEY-----\n"
+    },
+    "SplashScreen": {
+      "launchAutoHide": false
+    }
+  },
+  "pwa": {
+  
+  "name": "FDRE Advanced Services",
+  "short_name": "FDRE-AGS",
+  "description": "A blazing fast services",
+  "start_url": "/egsx/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#646cff",
+  "orientation": "portrait-primary",
+  "scope": "/egsx1/",
+  "lang": "en",
+  "categories": ["productivity", "utilities"],
+  "icons": [
+    {
+      "src": "img/ic_48x48.png",
+      "sizes": "48x48",
+      "type": "image/png"
+    },
+    {
+      "src": "img/ic_72x72.png",
+      "sizes": "72x72",
+      "type": "image/png"
+    },
+    {
+      "src": "img/ic_96x96.png",
+      "sizes": "96x96",
+      "type": "image/png"
+    },
+    {
+      "src": "img/ic_192x192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "img/ic_512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "img/maskable-icon-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+  }
+}

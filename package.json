@@ -3,15 +3,18 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  
   "scripts": {
     "dev": "vite --host",
     "build": "vite build",
     "preview": "vite preview",
     "deploy": "npm run build && npx gh-pages -d dist -b gh-pages"
   },
-
   "dependencies": {
+    "@capacitor/android": "^8.5.0",
+    "@capacitor/cli": "^8.5.0",
+    "@capacitor/core": "^8.5.0",
+    "@capacitor/device": "^8.0.3",
+    "@capacitor/filesystem": "^8.1.2",
     "compromise": "^14.15.0",
     "highlight.js": "^11.11.1",
     "idb": "^8.0.3",
