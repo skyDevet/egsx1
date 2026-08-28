@@ -1,0 +1,1003 @@
+// ============================================================
+// apiTasks.js - Capgo InAppBrowser Action Handler
+// WITH FULL CONSOLE LOGGING
+// ============================================================
+
+import { InAppBrowser } from '@capgo/capacitor-inappbrowser';
+
+let apiLogs = [];
+let activeBrowsers = {};
+let debugMode = true; // SET TO FALSE TO HIDE LOGS
+
+// ============================================================
+// CONSOLE HELPER
+// ============================================================
+
+function log(message, type = 'INFO') {
+  if (!debugMode) return;
+  
+  const timestamp = new Date().toISOString();
+  const prefix = `[${timestamp}] 🟢 CAPGO`;
+  
+  switch(type) {
+    case 'ERROR':
+      console.error(`${prefix} ❌ ${message}`);
+      break;
+    case 'WARN':
+      console.warn(`${prefix} ⚠️ ${message}`);
+      break;
+    case 'SUCCESS':
+      console.log(`${prefix} ✅ ${message}`);
+      break;
+    case 'DEBUG':
+      console.log(`${prefix} 🔍 ${message}`);
+      break;
+    default:
+      console.log(`${prefix} ${message}`);
+  }
+}
+
+// ============================================================
+// CONFIGURATION
+// ============================================================
+
+export function getApiLogs() {
+  return apiLogs;
+}
+
+export function clearApiLogs() {
+  apiLogs = [];
+}
+
+export function setDebugMode(enabled) {
+  debugMode = enabled;
+  log(`Debug mode set to: ${enabled}`, 'INFO');
+}
+
+// ============================================================
+// CAPGO INAPPBROWSER CORE - WITH FULL LOGGING
+// ============================================================
+
+async function runCapgoScript(code, hidden = true, scriptName = 'Anonymous') {
+  log(`🚀 STARTING SCRIPT: ${scriptName}`, 'INFO');
+  log(`📝 Hidden mode: ${hidden}`, 'DEBUG');
+  log(`📏 Script length: ${code.length} characters`, 'DEBUG');
+  
+  let browserId = null;
+  const startTime = Date.now();
+  
+  try {
+    // Open headless WebView
+    log('🔄 Opening WebView...', 'DEBUG');
+    
+    const { id } = await InAppBrowser.openWebView({
+      url: 'about:blank',
+      hidden: hidden
+    });
+    
+    browserId = id;
+    activeBrowsers[id] = { id, timestamp: Date.now(), scriptName };
+    log(`✅ WebView opened with ID: ${id}`, 'SUCCESS');
+    
+    // Execute the script with logging wrapper
+    log('🔄 Executing script...', 'DEBUG');
+    
+    const wrappedCode = `
+      (async function() {
+        const startTime = Date.now();
+        const logs = [];
+        const errors = [];
+        
+        // Override console methods to capture everything
+        const originalLog = console.log;
+        const originalError = console.error;
+        const originalWarn = console.warn;
+        const originalInfo = console.info;
+        const originalDebug = console.debug;
+        
+        console.log = function(...args) {
+          const msg = args.join(' ');
+          logs.push('📝 LOG: ' + msg);
+          originalLog.apply(console, ['[CAPGO-WEBVIEW]', ...args]);
+        };
+        
+        console.error = function(...args) {
+          const msg = args.join(' ');
+          logs.push('❌ ERROR: ' + msg);
+          errors.push(msg);
+          originalError.apply(console, ['[CAPGO-WEBVIEW]', ...args]);
+        };
+        
+        console.warn = function(...args) {
+          const msg = args.join(' ');
+          logs.push('⚠️ WARN: ' + msg);
+          originalWarn.apply(console, ['[CAPGO-WEBVIEW]', ...args]);
+        };
+        
+        console.info = function(...args) {
+          const msg = args.join(' ');
+          logs.push('ℹ️ INFO: ' + msg);
+          originalInfo.apply(console, ['[CAPGO-WEBVIEW]', ...args]);
+        };
+        
+        console.debug = function(...args) {
+          const msg = args.join(' ');
+          logs.push('🐛 DEBUG: ' + msg);
+          originalDebug.apply(console, ['[CAPGO-WEBVIEW]', ...args]);
+        };
+        
+        logs.push('🚀 Script execution started');
+        logs.push('📍 Timestamp: ' + new Date().toISOString());
+        
+        try {
+          // Execute the actual script
+          ${code}
+          
+          const duration = Date.now() - startTime;
+          logs.push('✅ Script completed successfully in ' + duration + 'ms');
+          
+          return {
+            success: true,
+            logs: logs,
+            errors: errors,
+            duration: duration,
+            timestamp: new Date().toISOString()
+          };
+        } catch (error) {
+          logs.push('💥 Script error: ' + error.message);
+          logs.push('Stack trace: ' + error.stack);
+          errors.push(error.message);
+          
+          return {
+            success: false,
+            error: error.message,
+            stack: error.stack,
+            logs: logs,
+            errors: errors,
+            duration: Date.now() - startTime,
+            timestamp: new Date().toISOString()
+          };
+        }
+      })();
+    `;
+    
+    const result = await InAppBrowser.executeScript({
+      id,
+      js: wrappedCode
+    });
+    
+    // Log everything from the WebView
+    log('📊 SCRIPT RESULT:', 'INFO');
+    console.log('==================================================');
+    console.log('🔍 FULL SCRIPT OUTPUT:');
+    console.log('--------------------------------------------------');
+    console.log('Success:', result.success);
+    console.log('Duration:', result.duration, 'ms');
+    console.log('Errors:', result.errors || 'None');
+    console.log('--------------------------------------------------');
+    
+    if (result.logs && result.logs.length > 0) {
+      console.log('📋 WEBVIEW CONSOLE LOGS:');
+      console.log('--------------------------------------------------');
+      result.logs.forEach((logLine, index) => {
+        console.log(`  ${index + 1}. ${logLine}`);
+      });
+      console.log('--------------------------------------------------');
+      console.log(`📊 Total logs: ${result.logs.length}`);
+    } else {
+      console.log('⚠️ No logs captured from WebView');
+    }
+    
+    if (result.error) {
+      console.log('❌ ERROR DETAILS:');
+      console.log('--------------------------------------------------');
+      console.log('Error:', result.error);
+      console.log('Stack:', result.stack || 'No stack trace');
+      console.log('--------------------------------------------------');
+    }
+    
+    console.log('==================================================');
+    
+    // Close the browser
+    log('🔄 Closing browser...', 'DEBUG');
+    await InAppBrowser.closeWebView({ id });
+    delete activeBrowsers[id];
+    
+    const totalDuration = Date.now() - startTime;
+    log(`✅ SCRIPT COMPLETED in ${totalDuration}ms`, 'SUCCESS');
+    
+    // Add to API logs
+    apiLogs.push({
+      timestamp: new Date().toISOString(),
+      scriptName: scriptName,
+      duration: totalDuration,
+      success: result.success !== false,
+      logs: result.logs || [],
+      error: result.error || null
+    });
+    
+    return result;
+    
+  } catch (error) {
+    log(`💥 FATAL ERROR: ${error.message}`, 'ERROR');
+    log(`Stack: ${error.stack}`, 'ERROR');
+    
+    if (browserId) {
+      try {
+        await InAppBrowser.closeWebView({ id: browserId });
+        delete activeBrowsers[browserId];
+        log('🧹 Cleaned up browser instance', 'DEBUG');
+      } catch (e) {
+        log(`Failed to clean up: ${e.message}`, 'WARN');
+      }
+    }
+    
+    const totalDuration = Date.now() - startTime;
+    
+    apiLogs.push({
+      timestamp: new Date().toISOString(),
+      scriptName: scriptName,
+      duration: totalDuration,
+      success: false,
+      error: error.message,
+      stack: error.stack
+    });
+    
+    return {
+      success: false,
+      error: error.message,
+      stack: error.stack,
+      duration: totalDuration,
+      logs: [`Fatal error: ${error.message}`]
+    };
+  }
+}
+
+// ============================================================
+// LOGGING SCRIPTS (Converted from Browserless)
+// ============================================================
+
+function getLoginScript(username, password) {
+  return `
+    console.log('🔐 Starting login process');
+    console.log('📧 Username:', '${username}');
+    console.log('🔑 Password length:', '${password}'.length);
+    
+    try {
+      console.log('📍 Navigating to login page...');
+      window.location.href = 'https://iftms.motl.gov.et/auth/sign-in';
+      
+      console.log('⏳ Waiting for page to load...');
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      
+      console.log('🔍 Looking for login form...');
+      await new Promise((resolve) => {
+        const checkInterval = setInterval(() => {
+          if (document.querySelector('[name="phone_number"]')) {
+            console.log('✅ Login form found!');
+            clearInterval(checkInterval);
+            resolve();
+          }
+          console.log('⏳ Still waiting for form...');
+        }, 500);
+        setTimeout(() => {
+          console.log('⚠️ Timeout waiting for form, continuing anyway');
+          resolve();
+        }, 10000);
+      });
+      
+      console.log('📝 Filling username field...');
+      const usernameField = document.querySelector('[name="phone_number"]');
+      if (usernameField) {
+        usernameField.value = '${username}';
+        console.log('✅ Username filled');
+      } else {
+        console.error('❌ Username field not found!');
+      }
+      
+      console.log('📝 Filling password field...');
+      const passwordField = document.querySelector('input[type="password"]');
+      if (passwordField) {
+        passwordField.value = '${password}';
+        console.log('✅ Password filled');
+      } else {
+        console.error('❌ Password field not found!');
+      }
+      
+      console.log('🔄 Submitting form...');
+      const submitBtn = document.querySelector('button[type="submit"]');
+      if (submitBtn) {
+        submitBtn.click();
+        console.log('✅ Form submitted');
+      } else {
+        console.error('❌ Submit button not found!');
+      }
+      
+      console.log('⏳ Waiting for navigation...');
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      
+      const currentUrl = window.location.href;
+      console.log('📍 Current URL:', currentUrl);
+      
+      const success = currentUrl.includes('dashboard');
+      console.log(success ? '✅ Login successful!' : '❌ Login failed');
+      
+      const cookies = document.cookie.split(';').map(c => {
+        const [name, value] = c.trim().split('=');
+        return { name, value };
+      });
+      console.log('🍪 Cookies captured:', cookies.length);
+      
+      return {
+        success: success,
+        cookies: cookies,
+        url: currentUrl,
+        message: success ? 'Login successful' : 'Login failed'
+      };
+    } catch (error) {
+      console.error('💥 Login error:', error.message);
+      console.error('Stack:', error.stack);
+      return {
+        success: false,
+        error: error.message,
+        stack: error.stack
+      };
+    }
+  `;
+}
+
+function getRegisterVehicleScript(vehicleData) {
+  return `
+    console.log('🚗 Starting vehicle registration');
+    console.log('📋 Vehicle data:', ${JSON.stringify(vehicleData)});
+    
+    try {
+      console.log('📍 Navigating to vehicle registration page...');
+      window.location.href = 'https://iftms.motl.gov.et/vehicles/add';
+      
+      console.log('⏳ Waiting for page to load...');
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      
+      console.log('🔍 Looking for vehicle form...');
+      await new Promise((resolve) => {
+        const checkInterval = setInterval(() => {
+          if (document.querySelector('[name="plateNumber"]')) {
+            console.log('✅ Vehicle form found!');
+            clearInterval(checkInterval);
+            resolve();
+          }
+          console.log('⏳ Still waiting for form...');
+        }, 500);
+        setTimeout(() => {
+          console.log('⚠️ Timeout waiting for form, continuing anyway');
+          resolve();
+        }, 10000);
+      });
+      
+      const fields = {
+        'plateNumber': '${vehicleData.plateNumber || ''}',
+        'plateCode': '${vehicleData.plateCode || ''}',
+        'motorNumber': '${vehicleData.motorNumber || ''}',
+        'vinNumber': '${vehicleData.vinNumber || ''}',
+        'manufacturer': '${vehicleData.manufacturer || ''}',
+        'vehicleModel': '${vehicleData.vehicleModel || ''}',
+        'manufactureYear': '${vehicleData.manufactureYear || ''}',
+        'vehicleType': '${vehicleData.vehicleType || ''}',
+        'engineCapacity': '${vehicleData.engineCapacity || ''}',
+        'fuelType': '${vehicleData.fuelType || ''}'
+      };
+      
+      console.log('📝 Filling vehicle form fields...');
+      Object.entries(fields).forEach(([name, value]) => {
+        const el = document.querySelector(\`[name="\${name}"]\`);
+        if (el) {
+          el.value = value;
+          console.log(\`✅ Filled \${name}: \${value}\`);
+        } else {
+          console.warn(\`⚠️ Field not found: \${name}\`);
+        }
+      });
+      
+      console.log('🔄 Submitting vehicle form...');
+      const submitBtn = document.querySelector('button[type="submit"]');
+      if (submitBtn) {
+        submitBtn.click();
+        console.log('✅ Form submitted');
+      } else {
+        console.error('❌ Submit button not found!');
+      }
+      
+      console.log('⏳ Waiting for navigation...');
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      
+      const currentUrl = window.location.href;
+      console.log('📍 Current URL:', currentUrl);
+      
+      const success = currentUrl.includes('success');
+      console.log(success ? '✅ Vehicle registration successful!' : '❌ Vehicle registration failed');
+      
+      return {
+        success: success,
+        url: currentUrl,
+        message: success ? 'Vehicle registered' : 'Registration failed'
+      };
+    } catch (error) {
+      console.error('💥 Vehicle registration error:', error.message);
+      console.error('Stack:', error.stack);
+      return {
+        success: false,
+        error: error.message,
+        stack: error.stack
+      };
+    }
+  `;
+}
+
+function getRegisterDriverScript(driverData) {
+  return `
+    console.log('👤 Starting driver registration');
+    console.log('📋 Driver data:', ${JSON.stringify(driverData)});
+    
+    try {
+      console.log('📍 Navigating to driver registration page...');
+      window.location.href = 'https://iftms.motl.gov.et/drivers/add';
+      
+      console.log('⏳ Waiting for page to load...');
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      
+      console.log('🔍 Looking for driver form...');
+      await new Promise((resolve) => {
+        const checkInterval = setInterval(() => {
+          if (document.querySelector('[name="driverName"]')) {
+            console.log('✅ Driver form found!');
+            clearInterval(checkInterval);
+            resolve();
+          }
+          console.log('⏳ Still waiting for form...');
+        }, 500);
+        setTimeout(() => {
+          console.log('⚠️ Timeout waiting for form, continuing anyway');
+          resolve();
+        }, 10000);
+      });
+      
+      const fields = {
+        'driverName': '${driverData.driverName || ''}',
+        'driverLicense': '${driverData.driverLicense || ''}',
+        'phoneNumber': '${driverData.phoneNumber || ''}',
+        'email': '${driverData.email || ''}'
+      };
+      
+      console.log('📝 Filling driver form fields...');
+      Object.entries(fields).forEach(([name, value]) => {
+        const el = document.querySelector(\`[name="\${name}"]\`);
+        if (el) {
+          el.value = value;
+          console.log(\`✅ Filled \${name}: \${value}\`);
+        } else {
+          console.warn(\`⚠️ Field not found: \${name}\`);
+        }
+      });
+      
+      console.log('🔄 Submitting driver form...');
+      const submitBtn = document.querySelector('button[type="submit"]');
+      if (submitBtn) {
+        submitBtn.click();
+        console.log('✅ Form submitted');
+      } else {
+        console.error('❌ Submit button not found!');
+      }
+      
+      console.log('⏳ Waiting for navigation...');
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      
+      const currentUrl = window.location.href;
+      console.log('📍 Current URL:', currentUrl);
+      
+      const success = currentUrl.includes('success');
+      console.log(success ? '✅ Driver registration successful!' : '❌ Driver registration failed');
+      
+      return {
+        success: success,
+        url: currentUrl,
+        message: success ? 'Driver registered' : 'Registration failed'
+      };
+    } catch (error) {
+      console.error('💥 Driver registration error:', error.message);
+      console.error('Stack:', error.stack);
+      return {
+        success: false,
+        error: error.message,
+        stack: error.stack
+      };
+    }
+  `;
+}
+
+function getSyncScript(operatorData, vehicles, drivers) {
+  return `
+    console.log('🔄 Starting sync process');
+    console.log('👤 Operator:', ${JSON.stringify(operatorData)});
+    console.log('🚗 Vehicles:', ${JSON.stringify(vehicles)});
+    console.log('👤 Drivers:', ${JSON.stringify(drivers)});
+    
+    try {
+      console.log('📍 Navigating to sync page...');
+      window.location.href = 'https://iftms.motl.gov.et/sync';
+      
+      console.log('⏳ Waiting for page to load...');
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      
+      console.log('🔄 Performing sync...');
+      const result = {
+        success: true,
+        operator: ${JSON.stringify(operatorData)},
+        vehiclesCount: ${vehicles.length},
+        driversCount: ${drivers.length},
+        timestamp: new Date().toISOString()
+      };
+      
+      console.log('✅ Sync completed successfully');
+      console.log('📊 Result:', result);
+      
+      return {
+        success: true,
+        data: result
+      };
+    } catch (error) {
+      console.error('💥 Sync error:', error.message);
+      console.error('Stack:', error.stack);
+      return {
+        success: false,
+        error: error.message,
+        stack: error.stack
+      };
+    }
+  `;
+}
+
+function getVINDecodeScript(vin) {
+  return `
+    console.log('🔍 Starting VIN decode for: ${vin}');
+    
+    try {
+      console.log('📍 Fetching VIN data from NHTSA...');
+      const response = await fetch('https://vpic.nhtsa.dot.gov/api/vehicles/decodevin/${vin}?format=json');
+      
+      console.log('📡 Response status:', response.status);
+      
+      if (!response.ok) {
+        throw new Error(\`HTTP error! status: \${response.status}\`);
+      }
+      
+      const data = await response.json();
+      console.log('✅ VIN data received successfully');
+      console.log('📊 Data:', data);
+      
+      return {
+        success: true,
+        data: data
+      };
+    } catch (error) {
+      console.error('💥 VIN decode error:', error.message);
+      console.error('Stack:', error.stack);
+      return {
+        success: false,
+        error: error.message,
+        stack: error.stack
+      };
+    }
+  `;
+}
+
+// ============================================================
+// API ACTION EXECUTOR - WITH LOGGING
+// ============================================================
+
+export async function executeApiAction(action, context = {}) {
+  log(`📌 EXECUTING ACTION: ${action.id || 'unknown'}`, 'INFO');
+  log(`📦 Context:`, 'DEBUG');
+  console.log(context);
+  
+  const startTime = Date.now();
+  
+  try {
+    let result;
+    let scriptName = action.id || 'unknown';
+    
+    switch (action.id) {
+      case 'login_to_iftms':
+        const username = context.phoneNumber || context.operator?.phoneNumber || '';
+        const password = context.password || context.operator?.password || '';
+        log(`🔐 Login with username: ${username}`, 'INFO');
+        result = await runCapgoScript(
+          getLoginScript(username, password),
+          true, // hidden
+          'Login Script'
+        );
+        break;
+        
+      case 'register_vehicle':
+        log(`🚗 Registering vehicle: ${context.plateNumber || 'unknown'}`, 'INFO');
+        result = await runCapgoScript(
+          getRegisterVehicleScript(context),
+          true,
+          'Vehicle Registration'
+        );
+        break;
+        
+      case 'register_driver':
+        log(`👤 Registering driver: ${context.driverName || 'unknown'}`, 'INFO');
+        result = await runCapgoScript(
+          getRegisterDriverScript(context),
+          true,
+          'Driver Registration'
+        );
+        break;
+        
+      case 'sync_to_ifmts':
+        log(`🔄 Syncing data...`, 'INFO');
+        result = await runCapgoScript(
+          getSyncScript(context.operator || {}, context.vehicles || [], context.drivers || []),
+          true,
+          'Sync Script'
+        );
+        break;
+        
+      case 'decode_vin':
+        const vinNumber = context.vinNumber || context.userInput || '';
+        log(`🔍 Decoding VIN: ${vinNumber}`, 'INFO');
+        result = await runCapgoScript(
+          getVINDecodeScript(vinNumber),
+          true,
+          'VIN Decode'
+        );
+        break;
+        
+      default:
+        log(`⚠️ Unknown action: ${action.id}, using generic handler`, 'WARN');
+        if (action.endpoint) {
+          log(`🌐 Fetching endpoint: ${action.endpoint}`, 'INFO');
+          const response = await fetch(action.endpoint, {
+            method: action.method || 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...(action.headers || {})
+            },
+            body: JSON.stringify(resolveParams(action.data || context, context))
+          });
+          
+          result = await response.json();
+          log(`✅ API call completed`, 'SUCCESS');
+        } else {
+          result = { success: false, error: `Unknown action: ${action.id}` };
+          log(`❌ Unknown action: ${action.id}`, 'ERROR');
+        }
+    }
+    
+    const duration = Date.now() - startTime;
+    
+    apiLogs.push({
+      timestamp: new Date().toISOString(),
+      action: action.id || action.type,
+      duration,
+      success: result.success !== false,
+      result: result
+    });
+    
+    log(`✅ ACTION COMPLETED in ${duration}ms`, 'SUCCESS');
+    log(`📊 Result:`, 'DEBUG');
+    console.log(result);
+    
+    return result;
+    
+  } catch (error) {
+    const duration = Date.now() - startTime;
+    
+    log(`💥 ACTION FAILED in ${duration}ms`, 'ERROR');
+    log(`❌ Error: ${error.message}`, 'ERROR');
+    log(`Stack: ${error.stack}`, 'ERROR');
+    
+    apiLogs.push({
+      timestamp: new Date().toISOString(),
+      action: action.id || action.type,
+      duration,
+      success: false,
+      error: error.message,
+      stack: error.stack
+    });
+    
+    return {
+      success: false,
+      error: error.message,
+      stack: error.stack
+    };
+  }
+}
+
+// ============================================================
+// VISIBLE BROWSER WITH USER INTERACTION
+// ============================================================
+
+export async function openVisibleBrowser(url, script = null) {
+  log(`🌐 Opening visible browser to: ${url}`, 'INFO');
+  
+  try {
+    const { id } = await InAppBrowser.openWebView({
+      url: url,
+      hidden: false,
+      options: {
+        showToolbar: true,
+        showURL: true,
+        enableDebug: true
+      }
+    });
+    
+    log(`✅ Browser opened with ID: ${id}`, 'SUCCESS');
+    activeBrowsers[id] = { id, timestamp: Date.now(), type: 'visible' };
+    
+    if (script) {
+      log('🔄 Executing script in visible browser...', 'DEBUG');
+      const result = await InAppBrowser.executeScript({
+        id,
+        js: script
+      });
+      log('✅ Script executed', 'SUCCESS');
+      return result;
+    }
+    
+    return { success: true, browserId: id };
+  } catch (error) {
+    log(`❌ Failed to open browser: ${error.message}`, 'ERROR');
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================
+// BROWSER MANAGEMENT
+// ============================================================
+
+export async function closeAllBrowsers() {
+  log(`🧹 Closing all browsers (${Object.keys(activeBrowsers).length} active)`, 'INFO');
+  
+  let closed = 0;
+  for (const id of Object.keys(activeBrowsers)) {
+    try {
+      await InAppBrowser.closeWebView({ id });
+      closed++;
+      log(`✅ Closed browser: ${id}`, 'SUCCESS');
+    } catch (e) {
+      log(`❌ Failed to close browser ${id}: ${e.message}`, 'ERROR');
+    }
+  }
+  activeBrowsers = {};
+  log(`🧹 Closed ${closed} browsers`, 'SUCCESS');
+}
+
+// ============================================================
+// EXECUTE STEP API ACTIONS
+// ============================================================
+
+export async function executeStepApiActions(step, context = {}) {
+  log(`📌 EXECUTING STEP ACTIONS for: ${step.id || 'unknown'}`, 'INFO');
+  
+  if (!step.apiActions || step.apiActions.length === 0) {
+    log('⚠️ No API actions to execute', 'WARN');
+    return { success: true, continue: true };
+  }
+  
+  log(`📋 Found ${step.apiActions.length} actions to execute`, 'INFO');
+  
+  const results = [];
+  
+  for (const action of step.apiActions) {
+    log(`🔄 Processing action: ${action.id || action.type}`, 'INFO');
+    
+    if (action.condition && !evaluateCondition(action.condition, context)) {
+      log(`⏭️ Skipping action (condition not met): ${action.id}`, 'WARN');
+      continue;
+    }
+    
+    const result = await executeApiAction(action, context);
+    results.push(result);
+    
+    if (!result.success) {
+      log(`❌ Action failed: ${action.id}`, 'ERROR');
+      return {
+        success: false,
+        error: result.error,
+        message: getLocalizedMessage(action.onFailure?.message) || result.error,
+        action: action,
+        results
+      };
+    }
+    
+    if (action.onSuccess?.nextStep) {
+      log(`🔄 Moving to next step: ${action.onSuccess.nextStep}`, 'INFO');
+      return {
+        success: true,
+        continue: false,
+        nextStep: action.onSuccess.nextStep,
+        message: getLocalizedMessage(action.onSuccess.message),
+        result,
+        results
+      };
+    }
+    
+    if (action.onSuccess?.continue === false) {
+      log(`⏹️ Stopping execution`, 'INFO');
+      return {
+        success: true,
+        continue: false,
+        message: getLocalizedMessage(action.onSuccess?.message),
+        result,
+        results
+      };
+    }
+  }
+  
+  log(`✅ All ${step.apiActions.length} actions completed successfully`, 'SUCCESS');
+  
+  return {
+    success: true,
+    continue: true,
+    results,
+    nextStep: step.onValid?.nextStep || null
+  };
+}
+
+// ============================================================
+// EXECUTE FIELD API ACTIONS
+// ============================================================
+
+export async function executeFieldApiActions(field, context = {}) {
+  log(`📌 EXECUTING FIELD ACTIONS for: ${field.id || 'unknown'}`, 'INFO');
+  
+  if (!field.apiActions || field.apiActions.length === 0) {
+    log('⚠️ No API actions to execute', 'WARN');
+    return { success: true, continue: true };
+  }
+  
+  log(`📋 Found ${field.apiActions.length} actions to execute`, 'INFO');
+  const results = [];
+  
+  for (const action of field.apiActions) {
+    log(`🔄 Processing action: ${action.id || action.type}`, 'INFO');
+    const result = await executeApiAction(action, context);
+    results.push(result);
+    
+    if (!result.success) {
+      log(`❌ Action failed: ${action.id}`, 'ERROR');
+      return {
+        success: false,
+        error: result.error,
+        message: getLocalizedMessage(action.onFailure?.message) || result.error,
+        action: action,
+        results
+      };
+    }
+    
+    if (action.onSuccess?.message) {
+      log(`✅ Action completed with message: ${action.onSuccess.message}`, 'SUCCESS');
+      return {
+        success: true,
+        continue: false,
+        message: getLocalizedMessage(action.onSuccess.message),
+        result,
+        results
+      };
+    }
+  }
+  
+  log(`✅ All ${field.apiActions.length} actions completed successfully`, 'SUCCESS');
+  
+  return {
+    success: true,
+    continue: true,
+    results
+  };
+}
+
+// ============================================================
+// HELPER FUNCTIONS
+// ============================================================
+
+function resolveParams(params, context) {
+  if (!params) return {};
+  
+  const result = {};
+  
+  for (const [key, value] of Object.entries(params)) {
+    if (typeof value === 'string' && value.includes('{{')) {
+      const matches = value.match(/\{\{([^}]+)\}\}/g);
+      if (matches) {
+        let resolved = value;
+        for (const match of matches) {
+          const path = match.slice(2, -2).trim();
+          const resolvedValue = getValueByPath(context, path);
+          resolved = resolved.replace(match, resolvedValue !== undefined ? String(resolvedValue) : '');
+        }
+        result[key] = resolved;
+      } else {
+        result[key] = value;
+      }
+    } else if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+      result[key] = resolveParams(value, context);
+    } else {
+      result[key] = value;
+    }
+  }
+  
+  return result;
+}
+
+function getValueByPath(obj, path) {
+  if (!obj || !path) return undefined;
+  
+  const parts = path.split('.');
+  let current = obj;
+  
+  for (const part of parts) {
+    if (current === undefined || current === null) return undefined;
+    if (part === 'collected_data') return obj.collectedData || {};
+    if (part === 'operator') return obj.operator || {};
+    if (part === 'vehicles') return obj.vehicles || [];
+    if (part === 'drivers') return obj.drivers || [];
+    if (part === 'user_input') return obj.userInput || '';
+    if (part === 'current_item') return obj.currentItem || {};
+    
+    current = current[part];
+  }
+  
+  return current;
+}
+
+function evaluateCondition(condition, context) {
+  if (!condition) return true;
+  
+  try {
+    const resolved = resolveParams({ value: condition }, context);
+    const expr = resolved.value || condition;
+    return Function('"use strict"; return (' + expr + ')')();
+  } catch {
+    return true;
+  }
+}
+
+function getLocalizedMessage(message) {
+  if (!message) return '';
+  if (typeof message === 'string') return message;
+  
+  const lang = localStorage.getItem('agig-language') || 'en';
+  if (typeof message === 'object') {
+    return message[lang] || message.en || '';
+  }
+  
+  return message;
+}
+
+// ============================================================
+// EXPORT DEFAULT
+// ============================================================
+
+export default {
+  executeApiAction,
+  executeStepApiActions,
+  executeFieldApiActions,
+  getApiLogs,
+  clearApiLogs,
+  openVisibleBrowser,
+  closeAllBrowsers,
+  runCapgoScript,
+  setDebugMode,
+  getLogs: getApiLogs
+};
+
+// ============================================================
+// AUTO LOGGING ON IMPORT
+// ============================================================
+
+console.log('==================================================');
+console.log('🚀 API TASKS LOADED WITH CAPGO INAPPBROWSER');
+console.log('📊 Debug mode:', debugMode ? 'ENABLED' : 'DISABLED');
+console.log('==================================================');

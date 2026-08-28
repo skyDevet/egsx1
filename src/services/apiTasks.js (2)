@@ -1,0 +1,398 @@
+// ============================================================
+// apiTasks.js - API Action Handler (Demo Mode)
+// ============================================================
+
+let demoMode = true;
+let apiLogs = [];
+
+// ============================================================
+// CONFIGURATION
+// ============================================================
+
+export function setDemoMode(enabled = true) {
+  demoMode = enabled;
+  console.log(`🎮 API Demo mode ${enabled ? 'enabled' : 'disabled'}`);
+}
+
+export function isDemoMode() {
+  return demoMode;
+}
+
+export function getApiLogs() {
+  return apiLogs;
+}
+
+export function clearApiLogs() {
+  apiLogs = [];
+}
+
+// ============================================================
+// API ACTION EXECUTOR
+// ============================================================
+
+export async function executeApiAction(action, context = {}) {
+  const startTime = Date.now();
+  
+  try {
+    if (demoMode) {
+      // Simulate API call with mock response
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      const mockResponse = generateMockResponse(action, context);
+      const duration = Date.now() - startTime;
+      
+      apiLogs.push({
+        timestamp: new Date().toISOString(),
+        action: action.id || action.type,
+        endpoint: action.endpoint || 'mock',
+        method: action.method || 'POST',
+        duration,
+        mock: true,
+        success: true
+      });
+      
+      console.log(`🎮 [DEMO] API Action [${action.id || action.type}]:`, mockResponse);
+      return mockResponse;
+    }
+    
+    // Real API call
+    const endpoint = resolveEndpoint(action, context);
+    const response = await fetch(endpoint, {
+      method: action.method || 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(action.headers || {})
+      },
+      body: JSON.stringify(resolveParams(action.data || context, context))
+    });
+    
+    const result = await response.json();
+    const duration = Date.now() - startTime;
+    
+    apiLogs.push({
+      timestamp: new Date().toISOString(),
+      action: action.id || action.type,
+      endpoint,
+      method: action.method || 'POST',
+      duration,
+      mock: false,
+      success: response.ok
+    });
+    
+    return {
+      success: response.ok,
+      data: result,
+      status: response.status
+    };
+    
+  } catch (error) {
+    const duration = Date.now() - startTime;
+    
+    apiLogs.push({
+      timestamp: new Date().toISOString(),
+      action: action.id || action.type,
+      endpoint: action.endpoint || 'mock',
+      method: action.method || 'POST',
+      duration,
+      mock: demoMode,
+      success: false,
+      error: error.message
+    });
+    
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+// ============================================================
+// EXECUTE STEP API ACTIONS
+// ============================================================
+
+export async function executeStepApiActions(step, context = {}) {
+  if (!step.apiActions || step.apiActions.length === 0) {
+    return { success: true, continue: true };
+  }
+  
+  const results = [];
+  
+  for (const action of step.apiActions) {
+    // Check condition if exists
+    if (action.condition && !evaluateCondition(action.condition, context)) {
+      console.log(`⏭️ Skipping API action: ${action.id || action.type}`);
+      continue;
+    }
+    
+    console.log(`🌐 Executing API action: ${action.id || action.type}`);
+    
+    const result = await executeApiAction(action, context);
+    results.push(result);
+    
+    if (!result.success) {
+      return {
+        success: false,
+        error: result.error,
+        message: getLocalizedMessage(action.onFailure?.message) || result.error,
+        action: action,
+        results
+      };
+    }
+    
+    // Handle onSuccess
+    if (action.onSuccess?.nextStep) {
+      return {
+        success: true,
+        continue: false,
+        nextStep: action.onSuccess.nextStep,
+        message: getLocalizedMessage(action.onSuccess.message),
+        result,
+        results
+      };
+    }
+    
+    if (action.onSuccess?.continue === false) {
+      return {
+        success: true,
+        continue: false,
+        message: getLocalizedMessage(action.onSuccess?.message),
+        result,
+        results
+      };
+    }
+  }
+  
+  return {
+    success: true,
+    continue: true,
+    results,
+    nextStep: step.onValid?.nextStep || null
+  };
+}
+
+// ============================================================
+// EXECUTE FIELD API ACTIONS
+// ============================================================
+
+export async function executeFieldApiActions(field, context = {}) {
+  if (!field.apiActions || field.apiActions.length === 0) {
+    return { success: true, continue: true };
+  }
+  
+  const results = [];
+  
+  for (const action of field.apiActions) {
+    console.log(`🌐 Executing field API action: ${action.id || action.type}`);
+    
+    const result = await executeApiAction(action, context);
+    results.push(result);
+    
+    if (!result.success) {
+      return {
+        success: false,
+        error: result.error,
+        message: getLocalizedMessage(action.onFailure?.message) || result.error,
+        action: action,
+        results
+      };
+    }
+    
+    if (action.onSuccess?.message) {
+      return {
+        success: true,
+        continue: false,
+        message: getLocalizedMessage(action.onSuccess.message),
+        result,
+        results
+      };
+    }
+  }
+  
+  return {
+    success: true,
+    continue: true,
+    results
+  };
+}
+
+// ============================================================
+// HELPER FUNCTIONS
+// ============================================================
+
+function resolveEndpoint(action, context) {
+  let endpoint = action.endpoint || '';
+  
+  // Replace template variables
+  if (endpoint.includes('{{')) {
+    const matches = endpoint.match(/\{\{([^}]+)\}\}/g);
+    if (matches) {
+      for (const match of matches) {
+        const path = match.slice(2, -2).trim();
+        const value = getValueByPath(context, path);
+        endpoint = endpoint.replace(match, value !== undefined ? String(value) : '');
+      }
+    }
+  }
+  
+  return endpoint;
+}
+
+function resolveParams(params, context) {
+  if (!params) return {};
+  
+  const result = {};
+  
+  for (const [key, value] of Object.entries(params)) {
+    if (typeof value === 'string' && value.includes('{{')) {
+      const matches = value.match(/\{\{([^}]+)\}\}/g);
+      if (matches) {
+        let resolved = value;
+        for (const match of matches) {
+          const path = match.slice(2, -2).trim();
+          const resolvedValue = getValueByPath(context, path);
+          resolved = resolved.replace(match, resolvedValue !== undefined ? String(resolvedValue) : '');
+        }
+        result[key] = resolved;
+      } else {
+        result[key] = value;
+      }
+    } else if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+      result[key] = resolveParams(value, context);
+    } else {
+      result[key] = value;
+    }
+  }
+  
+  return result;
+}
+
+function getValueByPath(obj, path) {
+  if (!obj || !path) return undefined;
+  
+  const parts = path.split('.');
+  let current = obj;
+  
+  for (const part of parts) {
+    if (current === undefined || current === null) return undefined;
+    if (part === 'collected_data') return obj.collectedData || {};
+    if (part === 'operator') return obj.operator || {};
+    if (part === 'vehicles') return obj.vehicles || [];
+    if (part === 'drivers') return obj.drivers || [];
+    if (part === 'user_input') return obj.userInput || '';
+    if (part === 'current_item') return obj.currentItem || {};
+    
+    current = current[part];
+  }
+  
+  return current;
+}
+
+function evaluateCondition(condition, context) {
+  if (!condition) return true;
+  
+  try {
+    const resolved = resolveParams({ value: condition }, context);
+    const expr = resolved.value || condition;
+    return Function('"use strict"; return (' + expr + ')')();
+  } catch {
+    return true;
+  }
+}
+
+function getLocalizedMessage(message) {
+  if (!message) return '';
+  if (typeof message === 'string') return message;
+  
+  const lang = localStorage.getItem('agig-language') || 'en';
+  if (typeof message === 'object') {
+    return message[lang] || message.en || '';
+  }
+  
+  return message;
+}
+
+function generateMockResponse(action, context) {
+  const actionId = action.id || action.type || '';
+  
+  if (actionId.includes('login')) {
+    return {
+      success: true,
+      token: 'mock_token_' + Date.now(),
+      user: {
+        id: '12345',
+        phone: context.phoneNumber || context.operator?.phoneNumber,
+        name: context.operatorName || context.operator?.operatorName
+      },
+      message: 'Login successful (demo)'
+    };
+  }
+  
+  if (actionId.includes('operator') || actionId.includes('register_operator')) {
+    return {
+      success: true,
+      operatorId: 'OP_' + Date.now(),
+      licenseNumber: context.businessLicenseNumber || context.operator?.businessLicenseNumber,
+      message: 'Operator registered successfully (demo)'
+    };
+  }
+  
+  if (actionId.includes('vehicle') || actionId.includes('register_vehicle')) {
+    return {
+      success: true,
+      vehicleId: 'VEH_' + Date.now(),
+      plateNumber: context.plateNumber || 'AA-1234',
+      message: 'Vehicle registered successfully (demo)'
+    };
+  }
+  
+  if (actionId.includes('driver') || actionId.includes('register_driver')) {
+    return {
+      success: true,
+      driverId: 'DRV_' + Date.now(),
+      licenseNumber: context.driverLicense || 'DL123456',
+      message: 'Driver registered successfully (demo)'
+    };
+  }
+  
+  if (actionId.includes('sync')) {
+    return {
+      success: true,
+      synced: true,
+      message: 'Data synced successfully (demo)'
+    };
+  }
+  
+  if (actionId.includes('vin') || actionId.includes('decode')) {
+    return {
+      success: true,
+      manufacturer: 'Toyota',
+      vehicleModel: 'Hilux',
+      manufactureYear: '2023',
+      vehicleType: 'Pickup',
+      engineCapacity: '2400',
+      fuelType: 'Diesel',
+      color: 'White',
+      message: 'VIN decoded successfully (demo)'
+    };
+  }
+  
+  return {
+    success: true,
+    message: 'Operation completed successfully (demo)',
+    data: context
+  };
+}
+
+// ============================================================
+// EXPORT DEFAULT
+// ============================================================
+
+export default {
+  executeApiAction,
+  executeStepApiActions,
+  executeFieldApiActions,
+  setDemoMode,
+  isDemoMode,
+  getApiLogs,
+  clearApiLogs
+};

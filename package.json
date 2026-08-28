@@ -16,6 +16,7 @@
     "@capacitor/core": "^8.5.0",
     "@capacitor/device": "^8.0.3",
     "@capacitor/filesystem": "^8.1.2",
+    "@capgo/capacitor-inappbrowser": "^8.15.3",
     "compromise": "^14.15.0",
     "highlight.js": "^11.11.1",
     "idb": "^8.0.3",

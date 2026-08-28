@@ -1,175 +1,82 @@
 // ============================================================
-// loginApi.js - Browserless.io Only (No Python Server)
+// loginApi.js - Calls Python Server for Session
 // ============================================================
 
-const BROWSERLESS_TOKEN = import.meta.env.VITE_BROWSERLESS_TOKEN || '2V8gQ7dU4HvS03Bb1ec733cd6bb13be1023887a5662723ff1';
-const BROWSERLESS_URL = import.meta.env.VITE_BROWSERLESS_URL || 'https://production-sfo.browserless.io';
+const PYTHON_SERVER = 'http://192.168.23.63:5001';
 
 // ============================================================
-// API FUNCTIONS THAT CALL BROWSERLESS CLOUD
+// API FUNCTIONS THAT CALL PYTHON SERVER
 // ============================================================
 
 async function getSession() {
-  console.log('📋 Getting session from localStorage...');
+  console.log('📋 Getting session from Python server...');
   
   try {
-    const saved = localStorage.getItem('ifmts_session');
-    if (!saved) {
-      return { success: false, error: 'No session found' };
-    }
-    const session = JSON.parse(saved);
-    if (session.expiry && Date.now() > session.expiry) {
-      localStorage.removeItem('ifmts_session');
-      return { success: false, error: 'Session expired' };
-    }
-    return { success: true, session };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-}
-
-async function runBrowserlessScript(code) {
-  console.log('🔐 Running Browserless script...');
-  
-  try {
-    const response = await fetch(`${BROWSERLESS_URL}/function`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Cache-Control': 'no-cache'
-      },
-      body: JSON.stringify({
-        code: code,
-        context: {
-          apiKey: BROWSERLESS_TOKEN
-        }
-      })
-    });
+    const response = await fetch(`${PYTHON_SERVER}/api/ifmts/session`);
     
     if (!response.ok) {
-      throw new Error(`Browserless API error: ${response.status}`);
+      console.warn('⚠️ Not authenticated. Please login.');
+      return { success: false, error: 'Not authenticated' };
     }
     
-    const result = await response.json();
-    console.log('✅ Browserless script executed');
-    return result;
+    const data = await response.json();
+    console.log('✅ Session loaded successfully');
+    return data;
   } catch (error) {
-    console.error('❌ Browserless error:', error.message);
+    console.error('❌ Failed to get session:', error.message);
     return { success: false, error: error.message };
   }
 }
 
-async function triggerLogin(username, password) {
-  console.log('🔐 Triggering login via Browserless...');
+async function triggerLogin() {
+  console.log('🔐 Triggering login via Python server...');
   
-  const loginScript = `
-    async function performLogin() {
-      const page = await browser.newPage();
-      
-      try {
-        console.log('🔐 Navigating to IFMTS login...');
-        await page.goto('https://iftms.motl.gov.et/auth/sign-in', {
-          waitUntil: 'networkidle2',
-          timeout: 30000
-        });
-        
-        await page.waitForSelector('[name="phone_number"]', { timeout: 10000 });
-        console.log('✅ Login form loaded');
-        
-        await page.type('[name="phone_number"]', '${username}', { delay: 50 });
-        await page.type('input[type="password"]', '${password}', { delay: 50 });
-        console.log('📝 Credentials entered');
-        
-        await page.click('button[type="submit"]');
-        console.log('🖱️ Login button clicked');
-        
-        await page.waitForNavigation({
-          waitUntil: 'networkidle2',
-          timeout: 30000
-        });
-        
-        const currentUrl = page.url();
-        const success = currentUrl.includes('dashboard');
-        
-        if (success) {
-          console.log('✅ Login successful!');
-          const cookies = await page.cookies();
-          
-          // Try to get user info from page
-          const userData = await page.evaluate(() => {
-            try {
-              const userId = document.querySelector('[data-user-id]')?.textContent || 
-                            document.querySelector('.user-id')?.textContent || null;
-              const licenseId = document.querySelector('[data-license-id]')?.textContent ||
-                               document.querySelector('.license-id')?.textContent || null;
-              return { userId, licenseApplicationId: licenseId };
-            } catch (e) {
-              return {};
-            }
-          });
-          
-          return {
-            success: true,
-            cookies: cookies,
-            url: currentUrl,
-            userData: userData
-          };
-        } else {
-          console.log('❌ Login failed');
-          return {
-            success: false,
-            url: currentUrl,
-            error: 'Login failed - check credentials'
-          };
-        }
-      } catch (error) {
-        console.error('❌ Login error:', error.message);
-        return {
-          success: false,
-          error: error.message
-        };
-      } finally {
-        await page.close();
-      }
-    }
+  try {
+    const response = await fetch(`${PYTHON_SERVER}/api/ifmts/login`, {
+      method: 'POST'
+    });
     
-    return await performLogin();
-  `;
-  
-  return await runBrowserlessScript(loginScript);
+    const data = await response.json();
+    console.log('✅ Login triggered:', data.message);
+    return data;
+  } catch (error) {
+    console.error('❌ Failed to trigger login:', error.message);
+    return { success: false, error: error.message };
+  }
 }
 
 async function getStatus() {
   try {
-    const session = await getSession();
-    return {
-      isAuthenticated: session.success,
-      ...session
-    };
+    const response = await fetch(`${PYTHON_SERVER}/api/ifmts/status`);
+    const data = await response.json();
+    return data;
   } catch (error) {
     return { isAuthenticated: false, error: error.message };
   }
 }
 
 async function refreshSession() {
-  console.log('🔄 Refreshing session...');
-  const saved = localStorage.getItem('ifmts_session');
-  if (!saved) {
-    return { success: false, error: 'No session to refresh' };
+  try {
+    const response = await fetch(`${PYTHON_SERVER}/api/ifmts/refresh`, {
+      method: 'POST'
+    });
+    const data = await response.json();
+    return data;
+  } catch (error) {
+    return { success: false, error: error.message };
   }
-  
-  const session = JSON.parse(saved);
-  if (!session.username || !session.password) {
-    return { success: false, error: 'No credentials stored' };
-  }
-  
-  return await triggerLogin(session.username, session.password);
 }
 
 async function logout() {
-  console.log('👋 Logging out...');
-  localStorage.removeItem('ifmts_session');
-  return { success: true, message: 'Logged out' };
+  try {
+    const response = await fetch(`${PYTHON_SERVER}/api/ifmts/logout`, {
+      method: 'POST'
+    });
+    const data = await response.json();
+    return data;
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
 }
 
 // ============================================================
@@ -180,17 +87,16 @@ const isDev = import.meta.env.DEV;
 
 const CONFIG = {
   API_BASE: isDev ? '/api-auth' : 'https://api.iftms.motl.gov.et',
-  BROWSERLESS_URL: BROWSERLESS_URL,
-  BROWSERLESS_TOKEN: BROWSERLESS_TOKEN
+  PYTHON_SERVER: PYTHON_SERVER,
 };
 
 console.log('🔧 ===== IFMTS API CONFIG =====');
-console.log(`🌐 Browserless URL: ${CONFIG.BROWSERLESS_URL}`);
+console.log(`🌐 Python Server: ${CONFIG.PYTHON_SERVER}`);
 console.log(`🌐 API Base: ${CONFIG.API_BASE}`);
 console.log('🔧 =============================');
 
 // ============================================================
-// IFMTS API CLASS - Uses Browserless
+// IFMTS API CLASS - Uses Python Server Session
 // ============================================================
 
 class IFMTSAPI {
@@ -205,11 +111,11 @@ class IFMTSAPI {
   }
 
   isAuthenticated() {
-    return this._isAuthenticated && this.cookies !== null;
+    return this._isAuthenticated && this.token !== null;
   }
 
   // ============================================================
-  // 1. LOAD SESSION FROM LOCALSTORAGE
+  // 1. LOAD SESSION FROM PYTHON SERVER
   // ============================================================
   
   async loadSession() {
@@ -238,46 +144,35 @@ class IFMTSAPI {
   }
 
   // ============================================================
-  // 2. LOGIN - Via Browserless
+  // 2. LOGIN - Triggers Python Selenium
   // ============================================================
   
   async login(username, password) {
-    console.log('🔐 ===== LOGIN VIA BROWSERLESS =====');
+    console.log('🔐 ===== LOGIN VIA PYTHON =====');
     console.log(`📱 Username: ${username}`);
     
-    try {
-      const result = await triggerLogin(username, password);
-      
-      if (!result.success) {
-        return { success: false, error: result.error };
-      }
-      
-      // Save session
-      const session = {
-        isAuthenticated: true,
-        username: username,
-        password: password,
-        cookies: result.cookies,
-        userId: result.userData?.userId || null,
-        licenseApplicationId: result.userData?.licenseApplicationId || null,
-        token: null,
-        expiry: Date.now() + 3600000
-      };
-      
-      localStorage.setItem('ifmts_session', JSON.stringify(session));
-      
-      this.cookies = result.cookies;
-      this.userId = session.userId;
-      this.licenseApplicationId = session.licenseApplicationId;
-      this._isAuthenticated = true;
-      this.sessionData = session;
-      
-      console.log('✅ Login completed!');
-      return { success: true };
-    } catch (error) {
-      console.error('❌ Login error:', error);
-      return { success: false, error: error.message };
+    // Trigger login
+    const result = await triggerLogin();
+    
+    if (!result.success) {
+      return { success: false, error: result.error };
     }
+    
+    // Wait for login to complete (poll status)
+    console.log('⏳ Waiting for login to complete...');
+    let attempts = 0;
+    while (attempts < 30) {
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      const status = await getStatus();
+      if (status.isAuthenticated) {
+        console.log('✅ Login completed!');
+        return await this.loadSession();
+      }
+      attempts++;
+    }
+    
+    return { success: false, error: 'Login timeout' };
   }
 
   // ============================================================
@@ -301,8 +196,8 @@ class IFMTSAPI {
       if (this.token) {
         headers['Authorization'] = `Bearer ${this.token}`;
       } else if (this.cookies) {
-        const cookieString = this.cookies
-          .map(c => `${c.name}=${c.value}`)
+        const cookieString = Object.entries(this.cookies)
+          .map(([name, value]) => `${name}=${value}`)
           .join('; ');
         headers['Cookie'] = cookieString;
       }
@@ -368,8 +263,8 @@ class IFMTSAPI {
       if (this.token) {
         headers['Authorization'] = `Bearer ${this.token}`;
       } else if (this.cookies) {
-        const cookieString = this.cookies
-          .map(c => `${c.name}=${c.value}`)
+        const cookieString = Object.entries(this.cookies)
+          .map(([name, value]) => `${name}=${value}`)
           .join('; ');
         headers['Cookie'] = cookieString;
       }
@@ -453,8 +348,8 @@ class IFMTSAPI {
       if (this.token) {
         headers['Authorization'] = `Bearer ${this.token}`;
       } else if (this.cookies) {
-        const cookieString = this.cookies
-          .map(c => `${c.name}=${c.value}`)
+        const cookieString = Object.entries(this.cookies)
+          .map(([name, value]) => `${name}=${value}`)
           .join('; ');
         headers['Cookie'] = cookieString;
       }
@@ -513,8 +408,8 @@ class IFMTSAPI {
       if (this.token) {
         headers['Authorization'] = `Bearer ${this.token}`;
       } else if (this.cookies) {
-        const cookieString = this.cookies
-          .map(c => `${c.name}=${c.value}`)
+        const cookieString = Object.entries(this.cookies)
+          .map(([name, value]) => `${name}=${value}`)
           .join('; ');
         headers['Cookie'] = cookieString;
       }
@@ -692,17 +587,16 @@ export const loginApi = {
   processIfmtsData,
   CONFIG,
   getApiInstance,
-  // Expose Browserless functions
+  // Expose Python server functions
   getSession,
   triggerLogin,
   getStatus,
   refreshSession,
-  logout,
-  runBrowserlessScript
+  logout
 };
 
 console.log('✅ ===== loginApi.js LOADED =====');
-console.log(`🌐 Browserless URL: ${CONFIG.BROWSERLESS_URL}`);
+console.log(`✅ Python Server: ${CONFIG.PYTHON_SERVER}`);
 console.log('✅ =============================');
 
 export default loginApi;

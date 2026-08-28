@@ -1,0 +1,529 @@
+// ============================================================
+// apiTasks.js - Browserless.io API Action Handler
+// ============================================================
+
+const BROWSERLESS_TOKEN = import.meta.env.VITE_BROWSERLESS_TOKEN || '2V8gQ7dU4HvS03Bb1ec733cd6bb13be1023887a5662723ff1';
+const BROWSERLESS_URL = import.meta.env.VITE_BROWSERLESS_URL || 'https://production-sfo.browserless.io';
+
+let apiLogs = [];
+
+// ============================================================
+// CONFIGURATION
+// ============================================================
+
+export function getApiLogs() {
+  return apiLogs;
+}
+
+export function clearApiLogs() {
+  apiLogs = [];
+}
+
+// ============================================================
+// BROWSERLESS CORE
+// ============================================================
+
+async function runBrowserlessScript(code) {
+  console.log('🌐 Running Browserless script...');
+  
+  try {
+    const response = await fetch(`${BROWSERLESS_URL}/function`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache'
+      },
+      body: JSON.stringify({
+        code: code,
+        context: {
+          apiKey: BROWSERLESS_TOKEN
+        }
+      })
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Browserless API error: ${response.status}`);
+    }
+    
+    const result = await response.json();
+    console.log('✅ Browserless script executed');
+    return result;
+  } catch (error) {
+    console.error('❌ Browserless error:', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================
+// BROWSERLESS SCRIPTS
+// ============================================================
+
+function getLoginScript(username, password) {
+  return `
+    async function performLogin() {
+      const page = await browser.newPage();
+      
+      try {
+        await page.goto('https://iftms.motl.gov.et/auth/sign-in', {
+          waitUntil: 'networkidle2',
+          timeout: 30000
+        });
+        
+        await page.waitForSelector('[name="phone_number"]', { timeout: 10000 });
+        await page.type('[name="phone_number"]', '${username}', { delay: 50 });
+        await page.type('input[type="password"]', '${password}', { delay: 50 });
+        await page.click('button[type="submit"]');
+        await page.waitForNavigation({
+          waitUntil: 'networkidle2',
+          timeout: 30000
+        });
+        
+        const success = page.url().includes('dashboard');
+        const cookies = await page.cookies();
+        
+        return {
+          success: success,
+          cookies: cookies,
+          url: page.url()
+        };
+      } catch (error) {
+        return { success: false, error: error.message };
+      } finally {
+        await page.close();
+      }
+    }
+    return await performLogin();
+  `;
+}
+
+function getRegisterVehicleScript(vehicleData) {
+  return `
+    async function registerVehicle() {
+      const page = await browser.newPage();
+      
+      try {
+        await page.goto('https://iftms.motl.gov.et/vehicles/add', {
+          waitUntil: 'networkidle2',
+          timeout: 30000
+        });
+        
+        await page.waitForSelector('[name="plateNumber"]', { timeout: 10000 });
+        
+        // Fill vehicle form
+        await page.type('[name="plateNumber"]', '${vehicleData.plateNumber || ''}');
+        await page.type('[name="plateCode"]', '${vehicleData.plateCode || ''}');
+        await page.type('[name="motorNumber"]', '${vehicleData.motorNumber || ''}');
+        await page.type('[name="vinNumber"]', '${vehicleData.vinNumber || ''}');
+        await page.type('[name="manufacturer"]', '${vehicleData.manufacturer || ''}');
+        await page.type('[name="vehicleModel"]', '${vehicleData.vehicleModel || ''}');
+        await page.type('[name="manufactureYear"]', '${vehicleData.manufactureYear || ''}');
+        await page.type('[name="vehicleType"]', '${vehicleData.vehicleType || ''}');
+        await page.type('[name="engineCapacity"]', '${vehicleData.engineCapacity || ''}');
+        await page.type('[name="fuelType"]', '${vehicleData.fuelType || ''}');
+        
+        await page.click('button[type="submit"]');
+        await page.waitForNavigation({ timeout: 30000 });
+        
+        const success = page.url().includes('success');
+        
+        return {
+          success: success,
+          url: page.url()
+        };
+      } catch (error) {
+        return { success: false, error: error.message };
+      } finally {
+        await page.close();
+      }
+    }
+    return await registerVehicle();
+  `;
+}
+
+function getRegisterDriverScript(driverData) {
+  return `
+    async function registerDriver() {
+      const page = await browser.newPage();
+      
+      try {
+        await page.goto('https://iftms.motl.gov.et/drivers/add', {
+          waitUntil: 'networkidle2',
+          timeout: 30000
+        });
+        
+        await page.waitForSelector('[name="driverName"]', { timeout: 10000 });
+        
+        await page.type('[name="driverName"]', '${driverData.driverName || ''}');
+        await page.type('[name="driverLicense"]', '${driverData.driverLicense || ''}');
+        await page.type('[name="phoneNumber"]', '${driverData.phoneNumber || ''}');
+        await page.type('[name="email"]', '${driverData.email || ''}');
+        
+        await page.click('button[type="submit"]');
+        await page.waitForNavigation({ timeout: 30000 });
+        
+        const success = page.url().includes('success');
+        
+        return {
+          success: success,
+          url: page.url()
+        };
+      } catch (error) {
+        return { success: false, error: error.message };
+      } finally {
+        await page.close();
+      }
+    }
+    return await registerDriver();
+  `;
+}
+
+function getSyncScript(operatorData, vehicles, drivers) {
+  return `
+    async function syncData() {
+      const page = await browser.newPage();
+      
+      try {
+        await page.goto('https://iftms.motl.gov.et/sync', {
+          waitUntil: 'networkidle2',
+          timeout: 30000
+        });
+        
+        const result = await page.evaluate((operator, vehicles, drivers) => {
+          // Mock sync - in real app this would call APIs
+          return {
+            success: true,
+            operator: operator,
+            vehiclesCount: vehicles.length,
+            driversCount: drivers.length
+          };
+        }, ${JSON.stringify(operatorData)}, ${JSON.stringify(vehicles)}, ${JSON.stringify(drivers)});
+        
+        return {
+          success: true,
+          data: result
+        };
+      } catch (error) {
+        return { success: false, error: error.message };
+      } finally {
+        await page.close();
+      }
+    }
+    return await syncData();
+  `;
+}
+
+function getVINDecodeScript(vin) {
+  return `
+    async function decodeVIN() {
+      const page = await browser.newPage();
+      
+      try {
+        await page.goto('https://vpic.nhtsa.dot.gov/api/vehicles/decodevin/${vin}?format=json', {
+          waitUntil: 'networkidle2',
+          timeout: 30000
+        });
+        
+        const content = await page.content();
+        const jsonMatch = content.match(/\\{[\\s\\S]*\\}/);
+        
+        if (jsonMatch) {
+          const data = JSON.parse(jsonMatch[0]);
+          return {
+            success: true,
+            data: data
+          };
+        }
+        
+        return {
+          success: false,
+          error: 'No VIN data found'
+        };
+      } catch (error) {
+        return { success: false, error: error.message };
+      } finally {
+        await page.close();
+      }
+    }
+    return await decodeVIN();
+  `;
+}
+
+// ============================================================
+// API ACTION EXECUTOR
+// ============================================================
+
+export async function executeApiAction(action, context = {}) {
+  const startTime = Date.now();
+  
+  try {
+    let result;
+    
+    switch (action.id) {
+      case 'login_to_iftms':
+        const username = context.phoneNumber || context.operator?.phoneNumber || '';
+        const password = context.password || context.operator?.password || '';
+        result = await runBrowserlessScript(getLoginScript(username, password));
+        break;
+        
+      case 'register_vehicle':
+        result = await runBrowserlessScript(getRegisterVehicleScript(context));
+        break;
+        
+      case 'register_driver':
+        result = await runBrowserlessScript(getRegisterDriverScript(context));
+        break;
+        
+      case 'sync_to_ifmts':
+        result = await runBrowserlessScript(
+          getSyncScript(context.operator || {}, context.vehicles || [], context.drivers || [])
+        );
+        break;
+        
+      case 'decode_vin':
+        result = await runBrowserlessScript(getVINDecodeScript(context.vinNumber || context.userInput || ''));
+        break;
+        
+      default:
+        // Default: try to run as generic script
+        if (action.endpoint) {
+          const response = await fetch(action.endpoint, {
+            method: action.method || 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...(action.headers || {})
+            },
+            body: JSON.stringify(resolveParams(action.data || context, context))
+          });
+          
+          result = await response.json();
+        } else {
+          result = { success: false, error: `Unknown action: ${action.id}` };
+        }
+    }
+    
+    const duration = Date.now() - startTime;
+    
+    apiLogs.push({
+      timestamp: new Date().toISOString(),
+      action: action.id || action.type,
+      duration,
+      success: result.success !== false
+    });
+    
+    console.log(`✅ API Action [${action.id}]:`, result);
+    return result;
+    
+  } catch (error) {
+    const duration = Date.now() - startTime;
+    
+    apiLogs.push({
+      timestamp: new Date().toISOString(),
+      action: action.id || action.type,
+      duration,
+      success: false,
+      error: error.message
+    });
+    
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+// ============================================================
+// EXECUTE STEP API ACTIONS
+// ============================================================
+
+export async function executeStepApiActions(step, context = {}) {
+  if (!step.apiActions || step.apiActions.length === 0) {
+    return { success: true, continue: true };
+  }
+  
+  const results = [];
+  
+  for (const action of step.apiActions) {
+    if (action.condition && !evaluateCondition(action.condition, context)) {
+      continue;
+    }
+    
+    console.log(`🌐 Executing step API action: ${action.id || action.type}`);
+    
+    const result = await executeApiAction(action, context);
+    results.push(result);
+    
+    if (!result.success) {
+      return {
+        success: false,
+        error: result.error,
+        message: getLocalizedMessage(action.onFailure?.message) || result.error,
+        action: action,
+        results
+      };
+    }
+    
+    if (action.onSuccess?.nextStep) {
+      return {
+        success: true,
+        continue: false,
+        nextStep: action.onSuccess.nextStep,
+        message: getLocalizedMessage(action.onSuccess.message),
+        result,
+        results
+      };
+    }
+    
+    if (action.onSuccess?.continue === false) {
+      return {
+        success: true,
+        continue: false,
+        message: getLocalizedMessage(action.onSuccess?.message),
+        result,
+        results
+      };
+    }
+  }
+  
+  return {
+    success: true,
+    continue: true,
+    results,
+    nextStep: step.onValid?.nextStep || null
+  };
+}
+
+// ============================================================
+// EXECUTE FIELD API ACTIONS
+// ============================================================
+
+export async function executeFieldApiActions(field, context = {}) {
+  if (!field.apiActions || field.apiActions.length === 0) {
+    return { success: true, continue: true };
+  }
+  
+  const results = [];
+  
+  for (const action of field.apiActions) {
+    console.log(`🌐 Executing field API action: ${action.id || action.type}`);
+    
+    const result = await executeApiAction(action, context);
+    results.push(result);
+    
+    if (!result.success) {
+      return {
+        success: false,
+        error: result.error,
+        message: getLocalizedMessage(action.onFailure?.message) || result.error,
+        action: action,
+        results
+      };
+    }
+    
+    if (action.onSuccess?.message) {
+      return {
+        success: true,
+        continue: false,
+        message: getLocalizedMessage(action.onSuccess.message),
+        result,
+        results
+      };
+    }
+  }
+  
+  return {
+    success: true,
+    continue: true,
+    results
+  };
+}
+
+// ============================================================
+// HELPER FUNCTIONS
+// ============================================================
+
+function resolveParams(params, context) {
+  if (!params) return {};
+  
+  const result = {};
+  
+  for (const [key, value] of Object.entries(params)) {
+    if (typeof value === 'string' && value.includes('{{')) {
+      const matches = value.match(/\{\{([^}]+)\}\}/g);
+      if (matches) {
+        let resolved = value;
+        for (const match of matches) {
+          const path = match.slice(2, -2).trim();
+          const resolvedValue = getValueByPath(context, path);
+          resolved = resolved.replace(match, resolvedValue !== undefined ? String(resolvedValue) : '');
+        }
+        result[key] = resolved;
+      } else {
+        result[key] = value;
+      }
+    } else if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+      result[key] = resolveParams(value, context);
+    } else {
+      result[key] = value;
+    }
+  }
+  
+  return result;
+}
+
+function getValueByPath(obj, path) {
+  if (!obj || !path) return undefined;
+  
+  const parts = path.split('.');
+  let current = obj;
+  
+  for (const part of parts) {
+    if (current === undefined || current === null) return undefined;
+    if (part === 'collected_data') return obj.collectedData || {};
+    if (part === 'operator') return obj.operator || {};
+    if (part === 'vehicles') return obj.vehicles || [];
+    if (part === 'drivers') return obj.drivers || [];
+    if (part === 'user_input') return obj.userInput || '';
+    if (part === 'current_item') return obj.currentItem || {};
+    
+    current = current[part];
+  }
+  
+  return current;
+}
+
+function evaluateCondition(condition, context) {
+  if (!condition) return true;
+  
+  try {
+    const resolved = resolveParams({ value: condition }, context);
+    const expr = resolved.value || condition;
+    return Function('"use strict"; return (' + expr + ')')();
+  } catch {
+    return true;
+  }
+}
+
+function getLocalizedMessage(message) {
+  if (!message) return '';
+  if (typeof message === 'string') return message;
+  
+  const lang = localStorage.getItem('agig-language') || 'en';
+  if (typeof message === 'object') {
+    return message[lang] || message.en || '';
+  }
+  
+  return message;
+}
+
+// ============================================================
+// EXPORT DEFAULT
+// ============================================================
+
+export default {
+  executeApiAction,
+  executeStepApiActions,
+  executeFieldApiActions,
+  getApiLogs,
+  clearApiLogs,
+  runBrowserlessScript
+};

@@ -1,10 +1,11 @@
 // ============================================================
-// nlpProcessor.js - Complete with Proper API Actions Integration
+// nlpProcessor.js - Complete with API Actions Integration
 // ============================================================
 
 import * as pdfjsLib from 'pdfjs-dist/build/pdf';
 import { vinDecoder } from './vindecoder.js';
 import { getServiceConfigDB } from './serviceConfigDB.js';
+import { loginApi } from './loginApi.js';
 import { executeStepApiActions, executeFieldApiActions } from './apiTasks.js';
 
 // ============================================================
@@ -41,7 +42,7 @@ function getLocalizedOptions(optionsObj) {
 }
 
 // ============================================================
-// DEFAULT SERVICES WITH LOGICAL API ACTIONS
+// DEFAULT SERVICES
 // ============================================================
 
 const DEFAULT_SERVICES = {
@@ -88,24 +89,21 @@ const DEFAULT_SERVICES = {
             error: { en: 'Password is required.', am: 'ይለፍ ቃል ያስፈልጋል።' }
           }
         ],
-        // API Action: Register Operator (after ALL fields collected)
+        // API Actions to execute after form completion
         apiActions: [
           {
-            id: 'register_operator',
-            endpoint: 'https://iftms.motl.gov.et/api/operator/register',
+            id: 'login_to_iftms',
+            endpoint: 'https://iftms.motl.gov.et/api/auth/login',
             method: 'POST',
             data: {
-              licenseNumber: '{{businessLicenseNumber}}',
-              name: '{{operatorName}}',
               phone: '{{phoneNumber}}',
               password: '{{password}}'
             },
             onSuccess: {
-              nextStep: 2,
-              message: { en: '✅ Operator registered! Proceeding to vehicle management.', am: '✅ ኦፕሬተር ተመዝግቧል! ወደ ተሽከርካሪ አስተዳደር በመቀጠል ላይ።' }
+              message: { en: '✅ Login successful!', am: '✅ መግቢያ ተሳካ!' }
             },
             onFailure: {
-              message: { en: '❌ Operator registration failed. Please try again.', am: '❌ የኦፕሬተር ምዝገባ አልተሳካም። እባክዎ እንደገና ይሞክሩ።' }
+              message: { en: '❌ Login failed. Check credentials.', am: '❌ መግቢያ አልተሳካም። ምስክርነቶችዎን ያረጋግጡ።' }
             }
           }
         ],
@@ -390,6 +388,27 @@ const DEFAULT_SERVICES = {
               autoFill: true 
             }
           ],
+          // API Action to register vehicle
+          apiActions: [
+            {
+              id: 'register_vehicle',
+              endpoint: 'https://iftms.motl.gov.et/api/vehicle/register',
+              method: 'POST',
+              data: {
+                plateNumber: '{{plateNumber}}',
+                plateCode: '{{plateCode}}',
+                motorNumber: '{{motorNumber}}',
+                vinNumber: '{{vinNumber}}',
+                operatorId: '{{operatorId}}'
+              },
+              onSuccess: {
+                message: { en: '✅ Vehicle registered!', am: '✅ ተሽከርካሪ ተመዝግቧል!' }
+              },
+              onFailure: {
+                message: { en: '❌ Vehicle registration failed.', am: '❌ የተሽከርካሪ ምዝገባ አልተሳካም።' }
+              }
+            }
+          ],
           onValid: { nextStep: 3, collectionKey: 'vehicles' }
         }
       },
@@ -416,6 +435,25 @@ const DEFAULT_SERVICES = {
               error: { en: 'Cannot be empty.', am: 'ባዶ መሆን አይችልም።' }
             }
           ],
+          // API Action to register driver
+          apiActions: [
+            {
+              id: 'register_driver',
+              endpoint: 'https://iftms.motl.gov.et/api/driver/register',
+              method: 'POST',
+              data: {
+                driverName: '{{driverName}}',
+                driverLicense: '{{driverLicense}}',
+                operatorId: '{{operatorId}}'
+              },
+              onSuccess: {
+                message: { en: '✅ Driver registered!', am: '✅ አሽከርካሪ ተመዝግቧል!' }
+              },
+              onFailure: {
+                message: { en: '❌ Driver registration failed.', am: '❌ የአሽከርካሪ ምዝገባ አልተሳካም።' }
+              }
+            }
+          ],
           onValid: { nextStep: 4, collectionKey: 'drivers' }
         }
       },
@@ -436,7 +474,7 @@ const DEFAULT_SERVICES = {
               drivers: '{{drivers}}'
             },
             onSuccess: {
-              message: { en: '✅ All data synced to IFMTS!', am: '✅ ሁሉም መረጃ ወደ IFMTS ተመሳስሏል!' }
+              message: { en: '✅ Registration complete! License generated.', am: '✅ ምዝገባ ተጠናቀቀ! ፈቃድ ተዘጋጅቷል።' }
             },
             onFailure: {
               message: { en: '❌ Sync failed. Please try again.', am: '❌ ማመሳሰል አልተሳካም። እባክዎ እንደገና ይሞክሩ።' }
@@ -470,25 +508,6 @@ const DEFAULT_SERVICES = {
             options: { en: ['Summarize', 'Extract Key Points', 'Find Keywords', 'Analyze Sentiment'], am: ['ማጠቃለል', 'ቁልፍ ነጥቦችን ማውጣት', 'ቁልፍ ቃላትን መፈለግ', 'ስሜትን መተንተን'] },
             example: { en: 'Summarize', am: 'ማጠቃለል' },
             error: { en: 'Please select an option.', am: 'እባክዎ አማራጭ ይምረጡ።' }
-          }
-        ],
-        // API Action: Analyze document
-        apiActions: [
-          {
-            id: 'analyze_document',
-            endpoint: 'https://api.documentanalysis.com/analyze',
-            method: 'POST',
-            data: {
-              document: '{{document}}',
-              analysisType: '{{analysisType}}'
-            },
-            onSuccess: {
-              nextStep: 3,
-              message: { en: '📊 Analysis complete!', am: '📊 ትንተና ተጠናቀቀ!' }
-            },
-            onFailure: {
-              message: { en: '❌ Analysis failed.', am: '❌ ትንተና አልተሳካም።' }
-            }
           }
         ],
         onValid: { nextStep: 3 }
@@ -550,7 +569,7 @@ const DEFAULT_SERVICES = {
 };
 
 // ============================================================
-// STATE MANAGEMENT (Rest of the code remains the same)
+// STATE
 // ============================================================
 
 let currentService = 'iftms';
@@ -567,7 +586,7 @@ let db = null;
 const serviceStates = {};
 
 // ============================================================
-// COMPLETION TRACKING
+// COMPLETION TRACKING - FIXED
 // ============================================================
 
 function isServiceComplete(serviceId) {
@@ -669,7 +688,7 @@ async function initializeServices() {
       console.log('✅ Default services saved to database!');
     }
     
-    // Initialize states for ALL services
+    // Initialize states for ALL services with isComplete: false
     for (const [id, svc] of Object.entries(services)) {
       if (!serviceStates[id]) {
         serviceStates[id] = {
@@ -844,6 +863,94 @@ function checkYesNo(message) {
   if (YES_WORDS.some(w => lower === w || lower.startsWith(w + ' '))) return 'yes';
   if (NO_WORDS.some(w => lower === w || lower.startsWith(w + ' '))) return 'no';
   return null;
+}
+
+// ============================================================
+// IFMTS SYNC
+// ============================================================
+
+async function syncToIfmts(collectedData) {
+  console.log('📋 ===== IFMTS SYNC START =====');
+  console.log('📋 Collected Data:', JSON.stringify(collectedData, null, 2));
+  
+  let phoneNumber = '';
+  let password = '';
+  
+  if (collectedData.operator) {
+    phoneNumber = collectedData.operator.phoneNumber || '';
+    password = collectedData.operator.password || '';
+    console.log('📞 Phone from operator:', phoneNumber);
+    console.log('🔑 Password from operator:', password ? '***provided***' : 'NOT provided');
+  }
+  
+  if (!phoneNumber && collectedData.phoneNumber) {
+    phoneNumber = collectedData.phoneNumber;
+    console.log('📞 Phone from direct:', phoneNumber);
+  }
+  if (!password && collectedData.password) {
+    password = collectedData.password;
+    console.log('🔑 Password from direct:', password ? '***provided***' : 'NOT provided');
+  }
+  
+  if (!phoneNumber || !password) {
+    const state = getState();
+    if (state && state.collectedData) {
+      const op = state.collectedData.operator || {};
+      if (!phoneNumber) phoneNumber = op.phoneNumber || '';
+      if (!password) password = op.password || '';
+      console.log('📞 Phone from state:', phoneNumber);
+      console.log('🔑 Password from state:', password ? '***provided***' : 'NOT provided');
+    }
+  }
+  
+  if (!phoneNumber || phoneNumber.trim() === '') {
+    console.error('❌ Phone number is missing or empty');
+    return {
+      success: false,
+      error: { en: '⚠️ Phone number is required. Please provide your IFMTS phone number in operator registration.', am: '⚠️ ስልክ ቁጥር ያስፈልጋል። እባክዎ የIFMTS ስልክ ቁጥርዎን በኦፕሬተር ምዝገባ ያስገቡ።' },
+      requiresCredentials: true
+    };
+  }
+  
+  if (!password || password.trim() === '') {
+    console.error('❌ Password is missing or empty');
+    return {
+      success: false,
+      error: { en: '⚠️ Password is required. Please provide your IFMTS password in operator registration.', am: '⚠️ ይለፍ ቃል ያስፈልጋል። እባክዎ የIFMTS ይለፍ ቃልዎን በኦፕሬተር ምዝገባ ያስገቡ።' },
+      requiresCredentials: true
+    };
+  }
+
+  console.log(`✅ Credentials found - Phone: ${phoneNumber}`);
+
+  try {
+    console.log('🔄 ===== CALLING IFMTS API =====');
+    console.log(`📱 Phone: ${phoneNumber}`);
+    console.log(`🔑 Password: ${password ? '***' : 'missing'}`);
+    console.log('📋 Data being synced:', {
+      operator: collectedData.operator ? '✅' : '❌',
+      vehicles: collectedData.vehicles?.length || 0,
+      drivers: collectedData.drivers?.length || 0
+    });
+    
+    const result = await loginApi.processIfmtsData(
+      collectedData,
+      { username: phoneNumber.trim(), password: password.trim() }
+    );
+    
+    console.log('📊 ===== IFMTS API RESPONSE =====');
+    console.log('📊 Result:', JSON.stringify(result, null, 2));
+    
+    return result;
+  } catch (error) {
+    console.error('❌ IFMTS sync error:', error);
+    console.error('❌ Error stack:', error.stack);
+    return {
+      success: false,
+      error: { en: error.message || 'Unknown error occurred during sync', am: 'የማመሳሰል ስህተት ተከስቷል' },
+      requiresCredentials: false
+    };
+  }
 }
 
 // ============================================================
@@ -1192,6 +1299,44 @@ async function buildComplete() {
     }
   }
   
+  if (currentService === 'iftms' || svc.id === 'iftms') {
+    const collectedData = state.collectedData;
+    const syncMsg = getLocalized({ en: '🔄 Syncing to IFMTS...', am: '🔄 ወደ IFMTS በማመሳሰል ላይ...' });
+    summary += `\n${syncMsg}\n`;
+    
+    try {
+      const syncResult = await syncToIfmts(collectedData);
+      
+      if (syncResult.success) {
+        const successMsg = getLocalized({ en: '✅ Data synced to IFMTS successfully!', am: '✅ መረጃ ወደ IFMTS በተሳካ ሁኔታ ተመሳሰለ!' });
+        summary += `\n${successMsg}\n`;
+        const operatorLabel = getLocalized({ en: 'Operator', am: 'ኦፕሬተር' });
+        const vehiclesLabel = getLocalized({ en: 'Vehicles', am: 'ተሽከርካሪዎች' });
+        const driversLabel = getLocalized({ en: 'Drivers', am: 'አሽከርካሪዎች' });
+        summary += `  • ${operatorLabel}: ${syncResult.operator?.success ? '✅ ' + getLocalized({ en: 'Registered', am: 'ተመዝግቧል' }) : '❌ ' + getLocalized({ en: 'Failed', am: 'አልተሳካም' })}\n`;
+        summary += `  • ${vehiclesLabel}: ${syncResult.vehicles?.filter(v => v.success).length || 0}/${syncResult.vehicles?.length || 0} ${getLocalized({ en: 'added', am: 'ተጨምሯል' })}\n`;
+        summary += `  • ${driversLabel}: ${syncResult.drivers?.filter(d => d.success).length || 0}/${syncResult.drivers?.length || 0} ${getLocalized({ en: 'added', am: 'ተጨምሯል' })}\n`;
+        if (syncResult.errors && syncResult.errors.length > 0) {
+          const errorMsg = getLocalized({ en: '⚠️ Errors occurred during sync.', am: '⚠️ በማመሳሰል ወቅት ስህተቶች ተከስተዋል።' });
+          summary += `\n${errorMsg}`;
+        }
+      } else if (syncResult.requiresCredentials) {
+        const errorText = getLocalized(syncResult.error);
+        summary += `\n⚠️ ${errorText}`;
+        const updateMsg = getLocalized({ en: 'Please update your operator information with IFMTS credentials.', am: 'እባክዎ የኦፕሬተር መረጃዎን በIFMTS ምስክርነቶች ያዘምኑ።' });
+        summary += `\n${updateMsg}`;
+      } else {
+        const errorText = getLocalized(syncResult.error) || getLocalized({ en: 'Unknown error', am: 'ያልታወቀ ስህተት' });
+        summary += `\n❌ ${getLocalized({ en: 'Failed to sync to IFMTS:', am: 'ወደ IFMTS ማመሳሰል አልተሳካም:' })} ${errorText}`;
+        const checkMsg = getLocalized({ en: 'Please check your credentials and try again.', am: 'እባክዎ ምስክርነቶችዎን ያረጋግጡ እና እንደገና ይሞክሩ።' });
+        summary += `\n${checkMsg}`;
+      }
+    } catch (error) {
+      console.error('❌ Sync error:', error);
+      summary += `\n❌ ${getLocalized({ en: 'Sync error:', am: 'የማመሳሰል ስህተት:' })} ${error.message}`;
+    }
+  }
+  
   return {
     text: summary,
     html: `<div><pre style="white-space:pre-wrap">${summary}</pre></div>`,
@@ -1225,6 +1370,103 @@ async function executeAction(action, rawValue, originalMessage) {
       return { text: prompt, html: `<div>${prompt}</div>`, isStructured: true };
     }
 
+    // ──────────────────────────────────────────────────────────
+    // NEW: Check for step API actions
+    // ──────────────────────────────────────────────────────────
+    if (step.apiActions && step.apiActions.length > 0) {
+      const context = {
+        userInput: originalMessage,
+        collectedData: state.collectedData,
+        currentItem: state.currentItem || {},
+        operator: state.collectedData.operator || {},
+        vehicles: state.collectedData.vehicles || [],
+        drivers: state.collectedData.drivers || [],
+        ...state.collectedData.operator
+      };
+      
+      const apiResult = await executeStepApiActions(step, context);
+      
+      if (!apiResult.success) {
+        return {
+          text: apiResult.message || apiResult.error || 'API action failed',
+          html: `<div class="error">❌ ${apiResult.message || apiResult.error || 'API action failed'}</div>`,
+          isStructured: true
+        };
+      }
+      
+      if (apiResult.message) {
+        if (apiResult.nextStep) {
+          state.currentStep = apiResult.nextStep;
+          state.currentFieldIndex = 0;
+          saveGlobalState();
+          const nextStepIntro = await stepIntro();
+          return {
+            text: `${apiResult.message}\n${nextStepIntro.text}`,
+            html: `<div class="success">✅ ${apiResult.message}</div>${nextStepIntro.html}`,
+            isStructured: true
+          };
+        }
+        
+        state.currentFieldIndex++;
+        saveGlobalState();
+        const nextField = getCurrentField();
+        const nextQuestion = nextField ? getLocalized(nextField.question) : '';
+        
+        return {
+          text: `${apiResult.message}\n${nextQuestion}`,
+          html: `<div class="success">✅ ${apiResult.message}</div>${nextQuestion ? `<div>${nextQuestion}</div>` : ''}`,
+          isStructured: true
+        };
+      }
+    }
+
+    // ──────────────────────────────────────────────────────────
+    // NEW: Check for field API actions
+    // ──────────────────────────────────────────────────────────
+    if (currentField && currentField.apiActions && currentField.apiActions.length > 0) {
+      const context = {
+        userInput: originalMessage,
+        collectedData: state.collectedData,
+        currentItem: state.currentItem || {},
+        operator: state.collectedData.operator || {},
+        vehicles: state.collectedData.vehicles || [],
+        drivers: state.collectedData.drivers || [],
+        ...state.collectedData.operator
+      };
+      
+      const apiResult = await executeFieldApiActions(currentField, context);
+      
+      if (!apiResult.success) {
+        return {
+          text: apiResult.message || apiResult.error || 'API action failed',
+          html: `<div class="error">❌ ${apiResult.message || apiResult.error || 'API action failed'}</div>`,
+          isStructured: true
+        };
+      }
+      
+      if (apiResult.message) {
+        if (apiResult.result?.data) {
+          const autoFillData = apiResult.result.data;
+          for (const [key, value] of Object.entries(autoFillData)) {
+            if (value && value !== 'Unknown') {
+              saveToState(key, value);
+            }
+          }
+        }
+        
+        state.currentFieldIndex++;
+        saveGlobalState();
+        const nextField = getCurrentField();
+        const nextQuestion = nextField ? getLocalized(nextField.question) : '';
+        
+        return {
+          text: `${apiResult.message}\n${nextQuestion}`,
+          html: `<div class="success">✅ ${apiResult.message}</div>${nextQuestion ? `<div>${nextQuestion}</div>` : ''}`,
+          isStructured: true
+        };
+      }
+    }
+
     switch (action) {
       case 'save': {
         if (!currentField) {
@@ -1235,43 +1477,6 @@ async function executeAction(action, rawValue, originalMessage) {
         if (currentField.name === 'vinNumber' || currentField.name === 'chassisNumber') {
           console.log('🔍 Processing VIN field with input:', originalMessage);
           
-          // Check for VIN API action
-          if (currentField.apiActions && currentField.apiActions.length > 0) {
-            const context = {
-              userInput: originalMessage,
-              collectedData: state.collectedData,
-              currentItem: state.currentItem || {},
-              operator: state.collectedData.operator || {},
-              ...state.currentItem
-            };
-            
-            const apiResult = await executeFieldApiActions(currentField, context);
-            
-            if (apiResult.success && apiResult.message) {
-              // Auto-fill fields if API returned data
-              if (apiResult.result?.data) {
-                const autoFillData = apiResult.result.data;
-                for (const [key, value] of Object.entries(autoFillData)) {
-                  if (value && value !== 'Unknown') {
-                    saveToState(key, value);
-                  }
-                }
-              }
-              
-              state.currentFieldIndex++;
-              saveGlobalState();
-              const nextField = getCurrentField();
-              const nextQuestion = nextField ? getLocalized(nextField.question) : '';
-              
-              return {
-                text: `${apiResult.message}\n${nextQuestion}`,
-                html: `<div class="success">✅ ${apiResult.message}</div>${nextQuestion ? `<div>${nextQuestion}</div>` : ''}`,
-                isStructured: true
-              };
-            }
-          }
-          
-          // Fallback to local VIN processing
           const vinResult = processVIN(originalMessage);
           
           if (vinResult) {
@@ -1360,36 +1565,6 @@ async function executeAction(action, rawValue, originalMessage) {
         }
 
         if (state.currentFieldIndex >= fields.length) {
-          // Check for step-level API actions before moving to next step
-          if (step.apiActions && step.apiActions.length > 0) {
-            const context = {
-              userInput: originalMessage,
-              collectedData: state.collectedData,
-              currentItem: state.currentItem || {},
-              operator: state.collectedData.operator || {},
-              vehicles: state.collectedData.vehicles || [],
-              drivers: state.collectedData.drivers || [],
-              ...state.collectedData.operator,
-              ...state.currentItem
-            };
-            
-            const apiResult = await executeStepApiActions(step, context);
-            
-            if (apiResult.success && apiResult.message) {
-              if (apiResult.nextStep) {
-                state.currentStep = apiResult.nextStep;
-                state.currentFieldIndex = 0;
-                saveGlobalState();
-                const nextStepIntro = await stepIntro();
-                return {
-                  text: `${apiResult.message}\n${nextStepIntro.text}`,
-                  html: `<div class="success">✅ ${apiResult.message}</div>${nextStepIntro.html}`,
-                  isStructured: true
-                };
-              }
-            }
-          }
-          
           if (step.subprocess) {
             if (Object.keys(state.currentItem).length > 0) {
               const key = step.subprocess.onValid.collectionKey;
