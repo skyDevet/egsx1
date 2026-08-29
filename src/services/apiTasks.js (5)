@@ -1,11 +1,8 @@
 // ============================================================
-// apiTasks.js - COMPLETE FIXED Capgo InAppBrowser
+// apiTasks.js - Capgo InAppBrowser Action Handler
 // ============================================================
 
-import { Plugins } from '@capacitor/core';
-
-// Get the plugin correctly
-const { CapgoInAppBrowser } = Plugins;
+import { InAppBrowser } from '@capgo/capacitor-inappbrowser';
 
 let apiLogs = [];
 let activeBrowsers = {}; // Store browser instances by ID
@@ -23,30 +20,24 @@ export function clearApiLogs() {
 }
 
 // ============================================================
-// CAPGO INAPPBROWSER CORE - FIXED
+// CAPGO INAPPBROWSER CORE
 // ============================================================
 
 async function runCapgoScript(code, hidden = true) {
   console.log('🌐 Running Capgo InAppBrowser script...');
   
   try {
-    // Check if plugin is available
-    if (!CapgoInAppBrowser) {
-      console.error('❌ CapgoInAppBrowser plugin not available');
-      return { success: false, error: 'Plugin not available' };
-    }
-    
-    // Open WebView
-    const result = await CapgoInAppBrowser.openWebView({
-      url: 'about:blank',
+    // Open headless WebView
+    const { id } = await InAppBrowser.openWebView({
+      url: 'about:blank', // Start blank, we'll navigate via script
       hidden: hidden
     });
     
-    activeBrowsers[result.id] = { id: result.id, timestamp: Date.now() };
+    activeBrowsers[id] = { id, timestamp: Date.now() };
     
     // Execute the script
-    const execResult = await CapgoInAppBrowser.executeScript({
-      id: result.id,
+    const result = await InAppBrowser.executeScript({
+      id,
       js: `
         (async function() {
           try {
@@ -59,11 +50,11 @@ async function runCapgoScript(code, hidden = true) {
     });
     
     // Close the browser after execution
-    await CapgoInAppBrowser.closeWebView({ id: result.id });
-    delete activeBrowsers[result.id];
+    await InAppBrowser.closeWebView({ id });
+    delete activeBrowsers[id];
     
     console.log('✅ Capgo script executed');
-    return execResult;
+    return result;
     
   } catch (error) {
     console.error('❌ Capgo error:', error.message);
@@ -358,12 +349,7 @@ export async function executeApiAction(action, context = {}) {
 
 export async function openVisibleBrowser(url, script = null) {
   try {
-    if (!CapgoInAppBrowser) {
-      console.error('❌ CapgoInAppBrowser plugin not available');
-      return { success: false, error: 'Plugin not available' };
-    }
-    
-    const result = await CapgoInAppBrowser.openWebView({
+    const { id } = await InAppBrowser.openWebView({
       url: url,
       hidden: false,
       options: {
@@ -372,19 +358,16 @@ export async function openVisibleBrowser(url, script = null) {
       }
     });
     
-    activeBrowsers[result.id] = { id: result.id, timestamp: Date.now() };
-    
     if (script) {
-      const execResult = await CapgoInAppBrowser.executeScript({
-        id: result.id,
+      const result = await InAppBrowser.executeScript({
+        id,
         js: script
       });
-      return execResult;
+      return result;
     }
     
-    return { success: true, browserId: result.id };
+    return { success: true, browserId: id };
   } catch (error) {
-    console.error('❌ Error opening browser:', error);
     return { success: false, error: error.message };
   }
 }
@@ -396,9 +379,7 @@ export async function openVisibleBrowser(url, script = null) {
 export async function closeAllBrowsers() {
   for (const id of Object.keys(activeBrowsers)) {
     try {
-      if (CapgoInAppBrowser) {
-        await CapgoInAppBrowser.closeWebView({ id });
-      }
+      await InAppBrowser.closeWebView({ id });
     } catch (e) {
       console.error(`Failed to close browser ${id}:`, e);
     }
@@ -513,7 +494,7 @@ export async function executeFieldApiActions(field, context = {}) {
 }
 
 // ============================================================
-// HELPER FUNCTIONS
+// HELPER FUNCTIONS (Same as original)
 // ============================================================
 
 function resolveParams(params, context) {
