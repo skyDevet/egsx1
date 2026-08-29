@@ -1,12 +1,11 @@
 // ============================================================
-// apiTasks.js - Capgo InAppBrowser Action Handler (VISIBLE MODE)
+// apiTasks.js - Capgo InAppBrowser Action Handler
 // ============================================================
 
 import { InAppBrowser } from '@capgo/capacitor-inappbrowser';
 
 let apiLogs = [];
-let activeBrowsers = {};
-let browserResults = {};
+let activeBrowsers = {}; // Store browser instances by ID
 
 // ============================================================
 // CONFIGURATION
@@ -21,29 +20,20 @@ export function clearApiLogs() {
 }
 
 // ============================================================
-// CAPGO INAPPBROWSER CORE - VISIBLE BROWSER
+// CAPGO INAPPBROWSER CORE
 // ============================================================
 
-async function runCapgoScript(code, url = 'about:blank', hidden = false) {
-  console.log('🌐 Running Capgo InAppBrowser script in VISIBLE mode...');
+async function runCapgoScript(code, hidden = true) {
+  console.log('🌐 Running Capgo InAppBrowser script...');
   
   try {
-    // Open browser VISIBLY
+    // Open headless WebView
     const { id } = await InAppBrowser.openWebView({
-      url: url,
-      hidden: hidden, // false = visible
-      options: {
-        showToolbar: true,
-        showURL: true,
-        toolbarColor: '#2563eb',
-        navigationBarColor: '#1e293b'
-      }
+      url: 'about:blank', // Start blank, we'll navigate via script
+      hidden: hidden
     });
     
-    activeBrowsers[id] = { id, timestamp: Date.now(), url };
-    
-    // Wait for page to load
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    activeBrowsers[id] = { id, timestamp: Date.now() };
     
     // Execute the script
     const result = await InAppBrowser.executeScript({
@@ -53,19 +43,18 @@ async function runCapgoScript(code, url = 'about:blank', hidden = false) {
           try {
             ${code}
           } catch (error) {
-            console.error('Script error:', error);
             return { success: false, error: error.message };
           }
         })();
       `
     });
     
-    // Store result
-    browserResults[id] = result;
+    // Close the browser after execution
+    await InAppBrowser.closeWebView({ id });
+    delete activeBrowsers[id];
     
-    // Don't close automatically - let user see what happened
-    console.log('✅ Capgo script executed, browser remains visible');
-    return { ...result, browserId: id };
+    console.log('✅ Capgo script executed');
+    return result;
     
   } catch (error) {
     console.error('❌ Capgo error:', error.message);
@@ -74,255 +63,205 @@ async function runCapgoScript(code, url = 'about:blank', hidden = false) {
 }
 
 // ============================================================
-// CLOSE BROWSER
-// ============================================================
-
-export async function closeBrowser(browserId) {
-  try {
-    await InAppBrowser.closeWebView({ id: browserId });
-    delete activeBrowsers[browserId];
-    delete browserResults[browserId];
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-}
-
-export async function closeAllBrowsers() {
-  for (const id of Object.keys(activeBrowsers)) {
-    try {
-      await InAppBrowser.closeWebView({ id });
-    } catch (e) {
-      console.error(`Failed to close browser ${id}:`, e);
-    }
-  }
-  activeBrowsers = {};
-  browserResults = {};
-}
-
-// ============================================================
-// CAPGO SCRIPTS - NAVIGATE AND FILL FORMS
+// CAPGO SCRIPTS (Converted from Browserless)
 // ============================================================
 
 function getLoginScript(username, password) {
   return `
-    console.log('🔐 Starting login process...');
+    const page = window;
     
-    // Navigate to login page
-    window.location.href = 'https://iftms.motl.gov.et/auth/sign-in';
-    
-    // Wait for page to load
-    await new Promise(resolve => {
-      const checkInterval = setInterval(() => {
-        if (document.querySelector('[name="phone_number"]')) {
-          clearInterval(checkInterval);
-          resolve();
-        }
-      }, 100);
-      setTimeout(resolve, 10000);
-    });
-    
-    console.log('📝 Filling login form...');
-    
-    // Fill login form
-    const phoneField = document.querySelector('[name="phone_number"]');
-    const passwordField = document.querySelector('input[type="password"]');
-    const submitButton = document.querySelector('button[type="submit"]');
-    
-    if (phoneField) {
-      phoneField.value = '${username}';
-      phoneField.dispatchEvent(new Event('input', { bubbles: true }));
+    try {
+      // Navigate to login page
+      window.location.href = 'https://iftms.motl.gov.et/auth/sign-in';
+      
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      
+      // Wait for form elements
+      await new Promise((resolve) => {
+        const checkInterval = setInterval(() => {
+          if (document.querySelector('[name="phone_number"]')) {
+            clearInterval(checkInterval);
+            resolve();
+          }
+        }, 100);
+      });
+      
+      // Fill login form
+      document.querySelector('[name="phone_number"]').value = '${username}';
+      document.querySelector('input[type="password"]').value = '${password}';
+      document.querySelector('button[type="submit"]').click();
+      
+      // Wait for navigation
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      
+      const success = window.location.href.includes('dashboard');
+      const cookies = document.cookie.split(';').map(c => {
+        const [name, value] = c.trim().split('=');
+        return { name, value };
+      });
+      
+      return {
+        success: success,
+        cookies: cookies,
+        url: window.location.href
+      };
+    } catch (error) {
+      return { success: false, error: error.message };
     }
-    
-    if (passwordField) {
-      passwordField.value = '${password}';
-      passwordField.dispatchEvent(new Event('input', { bubbles: true }));
-    }
-    
-    console.log('✅ Form filled, submitting...');
-    
-    if (submitButton) {
-      submitButton.click();
-    }
-    
-    // Wait for navigation
-    await new Promise(resolve => setTimeout(resolve, 3000));
-    
-    const success = window.location.href.includes('dashboard');
-    const url = window.location.href;
-    
-    console.log(success ? '✅ Login successful!' : '❌ Login failed');
-    console.log('📍 Current URL:', url);
-    
-    return {
-      success: success,
-      url: url,
-      message: success ? 'Login successful' : 'Login failed - check credentials'
-    };
   `;
 }
 
 function getRegisterVehicleScript(vehicleData) {
   return `
-    console.log('🚗 Starting vehicle registration...');
+    const page = window;
     
-    window.location.href = 'https://iftms.motl.gov.et/vehicles/add';
-    
-    await new Promise(resolve => {
-      const checkInterval = setInterval(() => {
-        if (document.querySelector('[name="plateNumber"]')) {
-          clearInterval(checkInterval);
-          resolve();
-        }
-      }, 100);
-      setTimeout(resolve, 10000);
-    });
-    
-    console.log('📝 Filling vehicle form...');
-    
-    const fields = {
-      'plateNumber': '${vehicleData.plateNumber || ''}',
-      'plateCode': '${vehicleData.plateCode || ''}',
-      'motorNumber': '${vehicleData.motorNumber || ''}',
-      'vinNumber': '${vehicleData.vinNumber || ''}',
-      'manufacturer': '${vehicleData.manufacturer || ''}',
-      'vehicleModel': '${vehicleData.vehicleModel || ''}',
-      'manufactureYear': '${vehicleData.manufactureYear || ''}',
-      'vehicleType': '${vehicleData.vehicleType || ''}',
-      'engineCapacity': '${vehicleData.engineCapacity || ''}',
-      'fuelType': '${vehicleData.fuelType || ''}'
-    };
-    
-    Object.entries(fields).forEach(([name, value]) => {
-      const el = document.querySelector(\`[name="\${name}"]\`);
-      if (el) {
-        el.value = value;
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        console.log(\`  ✅ Filled \${name}: \${value}\`);
-      }
-    });
-    
-    const submitButton = document.querySelector('button[type="submit"]');
-    if (submitButton) {
-      console.log('📤 Submitting form...');
-      submitButton.click();
+    try {
+      window.location.href = 'https://iftms.motl.gov.et/vehicles/add';
+      
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      
+      // Wait for form elements
+      await new Promise((resolve) => {
+        const checkInterval = setInterval(() => {
+          if (document.querySelector('[name="plateNumber"]')) {
+            clearInterval(checkInterval);
+            resolve();
+          }
+        }, 100);
+      });
+      
+      // Fill vehicle form
+      const fields = {
+        'plateNumber': '${vehicleData.plateNumber || ''}',
+        'plateCode': '${vehicleData.plateCode || ''}',
+        'motorNumber': '${vehicleData.motorNumber || ''}',
+        'vinNumber': '${vehicleData.vinNumber || ''}',
+        'manufacturer': '${vehicleData.manufacturer || ''}',
+        'vehicleModel': '${vehicleData.vehicleModel || ''}',
+        'manufactureYear': '${vehicleData.manufactureYear || ''}',
+        'vehicleType': '${vehicleData.vehicleType || ''}',
+        'engineCapacity': '${vehicleData.engineCapacity || ''}',
+        'fuelType': '${vehicleData.fuelType || ''}'
+      };
+      
+      Object.entries(fields).forEach(([name, value]) => {
+        const el = document.querySelector(\`[name="\${name}"]\`);
+        if (el) el.value = value;
+      });
+      
+      document.querySelector('button[type="submit"]').click();
+      
+      // Wait for navigation
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      
+      const success = window.location.href.includes('success');
+      
+      return {
+        success: success,
+        url: window.location.href
+      };
+    } catch (error) {
+      return { success: false, error: error.message };
     }
-    
-    await new Promise(resolve => setTimeout(resolve, 3000));
-    
-    const success = window.location.href.includes('success');
-    console.log(success ? '✅ Vehicle registered!' : '❌ Registration failed');
-    
-    return {
-      success: success,
-      url: window.location.href
-    };
   `;
 }
 
 function getRegisterDriverScript(driverData) {
   return `
-    console.log('👤 Starting driver registration...');
+    const page = window;
     
-    window.location.href = 'https://iftms.motl.gov.et/drivers/add';
-    
-    await new Promise(resolve => {
-      const checkInterval = setInterval(() => {
-        if (document.querySelector('[name="driverName"]')) {
-          clearInterval(checkInterval);
-          resolve();
-        }
-      }, 100);
-      setTimeout(resolve, 10000);
-    });
-    
-    console.log('📝 Filling driver form...');
-    
-    const fields = {
-      'driverName': '${driverData.driverName || ''}',
-      'driverLicense': '${driverData.driverLicense || ''}',
-      'phoneNumber': '${driverData.phoneNumber || ''}',
-      'email': '${driverData.email || ''}'
-    };
-    
-    Object.entries(fields).forEach(([name, value]) => {
-      const el = document.querySelector(\`[name="\${name}"]\`);
-      if (el) {
-        el.value = value;
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        console.log(\`  ✅ Filled \${name}: \${value}\`);
-      }
-    });
-    
-    const submitButton = document.querySelector('button[type="submit"]');
-    if (submitButton) {
-      console.log('📤 Submitting form...');
-      submitButton.click();
+    try {
+      window.location.href = 'https://iftms.motl.gov.et/drivers/add';
+      
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      
+      // Wait for form elements
+      await new Promise((resolve) => {
+        const checkInterval = setInterval(() => {
+          if (document.querySelector('[name="driverName"]')) {
+            clearInterval(checkInterval);
+            resolve();
+          }
+        }, 100);
+      });
+      
+      // Fill driver form
+      const fields = {
+        'driverName': '${driverData.driverName || ''}',
+        'driverLicense': '${driverData.driverLicense || ''}',
+        'phoneNumber': '${driverData.phoneNumber || ''}',
+        'email': '${driverData.email || ''}'
+      };
+      
+      Object.entries(fields).forEach(([name, value]) => {
+        const el = document.querySelector(\`[name="\${name}"]\`);
+        if (el) el.value = value;
+      });
+      
+      document.querySelector('button[type="submit"]').click();
+      
+      // Wait for navigation
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      
+      const success = window.location.href.includes('success');
+      
+      return {
+        success: success,
+        url: window.location.href
+      };
+    } catch (error) {
+      return { success: false, error: error.message };
     }
-    
-    await new Promise(resolve => setTimeout(resolve, 3000));
-    
-    const success = window.location.href.includes('success');
-    console.log(success ? '✅ Driver registered!' : '❌ Registration failed');
-    
-    return {
-      success: success,
-      url: window.location.href
-    };
   `;
 }
 
 function getSyncScript(operatorData, vehicles, drivers) {
   return `
-    console.log('🔄 Starting sync process...');
+    const page = window;
     
-    window.location.href = 'https://iftms.motl.gov.et/sync';
-    
-    await new Promise(resolve => setTimeout(resolve, 3000));
-    
-    // Collect data from page
-    const pageData = {
-      operator: ${JSON.stringify(operatorData)},
-      vehicles: ${JSON.stringify(vehicles)},
-      drivers: ${JSON.stringify(drivers)}
-    };
-    
-    console.log('📊 Data prepared for sync:', pageData);
-    
-    // Try to find and click sync button
-    const syncButton = document.querySelector('button[type="submit"]') || 
-                       document.querySelector('button:contains("Sync")');
-    
-    if (syncButton) {
-      console.log('📤 Clicking sync button...');
-      syncButton.click();
+    try {
+      window.location.href = 'https://iftms.motl.gov.et/sync';
+      
       await new Promise(resolve => setTimeout(resolve, 3000));
+      
+      // Mock sync - in real app this would call APIs
+      const result = {
+        success: true,
+        operator: ${JSON.stringify(operatorData)},
+        vehiclesCount: ${vehicles.length},
+        driversCount: ${drivers.length}
+      };
+      
+      return {
+        success: true,
+        data: result
+      };
+    } catch (error) {
+      return { success: false, error: error.message };
     }
-    
-    return {
-      success: true,
-      data: pageData,
-      url: window.location.href
-    };
   `;
 }
 
 function getVINDecodeScript(vin) {
-  // VIN decoding - use fetch directly in app context instead
   return `
-    console.log('🔍 Decoding VIN: ${vin}');
+    const page = window;
     
-    // Return the VIN - app will handle the fetch
-    return {
-      success: true,
-      action: 'decode_vin',
-      vin: '${vin}'
-    };
+    try {
+      const response = await fetch('https://vpic.nhtsa.dot.gov/api/vehicles/decodevin/${vin}?format=json');
+      const data = await response.json();
+      
+      return {
+        success: true,
+        data: data
+      };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
   `;
 }
 
 // ============================================================
-// API ACTION EXECUTOR - WITH VISIBLE BROWSER
+// API ACTION EXECUTOR
 // ============================================================
 
 export async function executeApiAction(action, context = {}) {
@@ -330,50 +269,30 @@ export async function executeApiAction(action, context = {}) {
   
   try {
     let result;
-    let browserId = null;
-    
-    console.log(`🎯 Executing action: ${action.id || action.type}`);
     
     switch (action.id) {
       case 'login_to_iftms':
-      case 'login_operator':
         const username = context.phoneNumber || context.operator?.phoneNumber || '';
         const password = context.password || context.operator?.password || '';
-        result = await runCapgoScript(getLoginScript(username, password), 'https://iftms.motl.gov.et/auth/sign-in', false);
-        browserId = result.browserId;
+        result = await runCapgoScript(getLoginScript(username, password));
         break;
         
       case 'register_vehicle':
-        result = await runCapgoScript(getRegisterVehicleScript(context), 'https://iftms.motl.gov.et/vehicles/add', false);
-        browserId = result.browserId;
+        result = await runCapgoScript(getRegisterVehicleScript(context));
         break;
         
       case 'register_driver':
-        result = await runCapgoScript(getRegisterDriverScript(context), 'https://iftms.motl.gov.et/drivers/add', false);
-        browserId = result.browserId;
+        result = await runCapgoScript(getRegisterDriverScript(context));
         break;
         
       case 'sync_to_ifmts':
         result = await runCapgoScript(
-          getSyncScript(context.operator || {}, context.vehicles || [], context.drivers || []),
-          'https://iftms.motl.gov.et/sync',
-          false
+          getSyncScript(context.operator || {}, context.vehicles || [], context.drivers || [])
         );
-        browserId = result.browserId;
         break;
         
       case 'decode_vin':
-        // VIN decoding - fetch in app context (NOT in WebView)
-        const vin = context.vinNumber || context.userInput || '';
-        console.log('🔍 Decoding VIN in app context:', vin);
-        try {
-          const response = await fetch(`https://vpic.nhtsa.dot.gov/api/vehicles/decodevin/${vin}?format=json`);
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          const data = await response.json();
-          result = { success: true, data };
-        } catch (error) {
-          result = { success: false, error: error.message };
-        }
+        result = await runCapgoScript(getVINDecodeScript(context.vinNumber || context.userInput || ''));
         break;
         
       default:
@@ -400,12 +319,11 @@ export async function executeApiAction(action, context = {}) {
       timestamp: new Date().toISOString(),
       action: action.id || action.type,
       duration,
-      success: result.success !== false,
-      browserId: browserId
+      success: result.success !== false
     });
     
-    console.log(`✅ API Action [${action.id}] completed in ${duration}ms:`, result);
-    return { ...result, browserId };
+    console.log(`✅ API Action [${action.id}]:`, result);
+    return result;
     
   } catch (error) {
     const duration = Date.now() - startTime;
@@ -418,8 +336,6 @@ export async function executeApiAction(action, context = {}) {
       error: error.message
     });
     
-    console.error(`❌ API Action [${action.id}] failed:`, error);
-    
     return {
       success: false,
       error: error.message
@@ -428,15 +344,47 @@ export async function executeApiAction(action, context = {}) {
 }
 
 // ============================================================
-// GET BROWSER STATUS
+// VISIBLE BROWSER WITH USER INTERACTION
 // ============================================================
 
-export function getActiveBrowsers() {
-  return Object.values(activeBrowsers);
+export async function openVisibleBrowser(url, script = null) {
+  try {
+    const { id } = await InAppBrowser.openWebView({
+      url: url,
+      hidden: false,
+      options: {
+        showToolbar: true,
+        showURL: true
+      }
+    });
+    
+    if (script) {
+      const result = await InAppBrowser.executeScript({
+        id,
+        js: script
+      });
+      return result;
+    }
+    
+    return { success: true, browserId: id };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
 }
 
-export function getBrowserResult(browserId) {
-  return browserResults[browserId] || null;
+// ============================================================
+// BROWSER MANAGEMENT
+// ============================================================
+
+export async function closeAllBrowsers() {
+  for (const id of Object.keys(activeBrowsers)) {
+    try {
+      await InAppBrowser.closeWebView({ id });
+    } catch (e) {
+      console.error(`Failed to close browser ${id}:`, e);
+    }
+  }
+  activeBrowsers = {};
 }
 
 // ============================================================
@@ -546,7 +494,7 @@ export async function executeFieldApiActions(field, context = {}) {
 }
 
 // ============================================================
-// HELPER FUNCTIONS
+// HELPER FUNCTIONS (Same as original)
 // ============================================================
 
 function resolveParams(params, context) {
@@ -615,13 +563,9 @@ function getLocalizedMessage(message) {
   if (!message) return '';
   if (typeof message === 'string') return message;
   
-  try {
-    const lang = localStorage.getItem('agig-language') || 'en';
-    if (typeof message === 'object') {
-      return message[lang] || message.en || '';
-    }
-  } catch {
-    return message.en || '';
+  const lang = localStorage.getItem('agig-language') || 'en';
+  if (typeof message === 'object') {
+    return message[lang] || message.en || '';
   }
   
   return message;
@@ -637,9 +581,7 @@ export default {
   executeFieldApiActions,
   getApiLogs,
   clearApiLogs,
-  closeBrowser,
+  openVisibleBrowser,
   closeAllBrowsers,
-  getActiveBrowsers,
-  getBrowserResult,
   runCapgoScript
 };
