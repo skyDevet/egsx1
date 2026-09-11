@@ -1,9 +1,10 @@
 # Dependencies
 node_modules/
 .cache/
-
+worker/
+server/
 # Build outputs - THESE WILL NOT BE PUSHED
-dist/
+
 .vite/
 build/
 .capacitor/

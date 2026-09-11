@@ -10,7 +10,15 @@ export default defineConfig(({ mode }) => {
     plugins: [preact()],
     server: { 
       host: true, 
-      port: 3000 
+      port: 3000,
+      // Proxy API requests to Express server
+      proxy: {
+      '/api': {
+        target: 'https://worker.skyn4302.workers.dev',
+        changeOrigin: true,
+        secure: false
+      }
+      }
     },
     build: { 
       outDir: 'dist', 
@@ -27,10 +35,10 @@ export default defineConfig(({ mode }) => {
     },
     // ✅ CRITICAL FIX: Configure worker format
     // ✅ Fixed version
-worker: {
-  format: 'es',
-  plugins: () => [preact()]  // Function that returns array
-},
+    worker: {
+      format: 'es',
+      plugins: () => [preact()]  // Function that returns array
+    },
     // Optimize dependencies for Capacitor
     optimizeDeps: {
       include: [
