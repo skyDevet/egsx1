@@ -1,14 +1,14 @@
 # Dependencies
 node_modules/
 .cache/
-worker/
-server/
-# Build outputs - THESE WILL NOT BE PUSHED
 
+# Build outputs - THESE WILL NOT BE PUSHED
+dist/
 .vite/
 build/
 .capacitor/
-
+worker/
+server/
 # OS files
 .DS_Store
 Thumbs.db
