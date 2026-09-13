@@ -5,6 +5,7 @@ import morgan from 'morgan';
 import session from 'express-session';
 import dotenv from 'dotenv';
 import nlpRoutes from './routes/nlp.js';
+import authRoutes from './routes/auth.js';
 import { nlpProcessor } from './services/nlprocessor.js';
 
 dotenv.config();
@@ -35,6 +36,10 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'healthy', timestamp: Date.now(), uptime: process.uptime() });
 });
 
+// Auth (Fayda + Google OIDC)
+app.use('/auth', authRoutes);
+
+// NLP
 app.use('/api/nlp', nlpRoutes);
 
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));

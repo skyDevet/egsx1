@@ -1,127 +1,165 @@
+// ============================================================
+// src/services/auth.js
+// Frontend AuthManager — talks to /auth/* on the Cloudflare Worker
+// Same public API as your original so no component breaks
+// ============================================================
+
+const AUTH_API = import.meta.env.VITE_AUTH_API || '/auth';
+const TOKEN_KEY = 'auth_token';
+const USER_KEY  = 'currentUser';
+
 class AuthManager {
   constructor() {
     this.state = {
       currentUser: null,
       isAuthenticated: false,
       isLoading: false
-    }
-    this.init()
+    };
+    this.init();
   }
 
   async init() {
-    console.log('🔄 Initializing Auth Manager...')
-    this.checkAuthState()
-    console.log('✅ Auth Manager initialized')
+    console.log('🔄 Initializing Auth Manager...');
+
+    // Handle redirect back from /auth/success?token=...
+    const params = new URLSearchParams(window.location.search);
+    const urlToken = params.get('token');
+    if (urlToken) {
+      localStorage.setItem(TOKEN_KEY, urlToken);
+      // Strip token from URL so it doesn't linger in history
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+
+    await this.checkAuthState();
+    console.log('✅ Auth Manager initialized');
   }
 
-  checkAuthState() {
-    const savedUser = localStorage.getItem('currentUser')
-    if (savedUser) {
-      const user = JSON.parse(savedUser)
-      this.state.currentUser = user
-      this.state.isAuthenticated = true
+  async checkAuthState() {
+    const token = localStorage.getItem(TOKEN_KEY);
+
+    // Clear any leftover fake user from the old version
+    if (!token) {
+      const legacy = localStorage.getItem(USER_KEY);
+      if (legacy) localStorage.removeItem(USER_KEY);
+      this.state.currentUser = null;
+      this.state.isAuthenticated = false;
+      return;
     }
+
+    try {
+      this.state.isLoading = true;
+      const res = await fetch(`${AUTH_API}/me`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+
+      if (!res.ok) {
+        this.signOut();
+        return;
+      }
+
+      const data = await res.json();
+      this.state.currentUser = data.user;
+      this.state.isAuthenticated = true;
+      localStorage.setItem(USER_KEY, JSON.stringify(data.user));
+    } catch (err) {
+      console.error('Auth check failed:', err);
+      this.state.isAuthenticated = false;
+      this.state.currentUser = null;
+    } finally {
+      this.state.isLoading = false;
+    }
+  }
+
+  // ----------------------------------------------------------
+  // Real OIDC — redirect the browser to the backend
+  // ----------------------------------------------------------
+
+  async signInWithFayda() {
+    this.state.isLoading = true;
+    window.location.href = `${AUTH_API}/fayda/login`;
   }
 
   async signInWithGoogle() {
-    await this.simulateOAuth('Google')
+    this.state.isLoading = true;
+    window.location.href = `${AUTH_API}/google/login`;
   }
 
+  // Aliases so existing UI buttons keep working
   async signInWithGitHub() {
-    await this.simulateOAuth('Fayda')
+    return this.signInWithFayda();
   }
 
   async signInWithMicrosoft() {
-    await this.simulateOAuth('Microsoft')
+    this.showMessage('Microsoft sign-in not configured yet.', 'info');
   }
 
   async handleEmailSignIn(email) {
-    await this.simulateEmailSignIn(email)
+    this.showMessage('Email sign-in not configured yet.', 'info');
   }
 
-  async simulateOAuth(provider) {
-    this.state.isLoading = true
-
-    await new Promise(resolve => setTimeout(resolve, 1500))
-
-    const user = {
-      id: Math.random().toString(36).substr(2, 9),
-      name: `${provider} User`,
-      email: `user@${provider.toLowerCase()}.com`,
-      provider: provider.toLowerCase(),
-      avatar: null
-    }
-
-    this.state.currentUser = user
-    this.state.isAuthenticated = true
-    this.state.isLoading = false
-
-    localStorage.setItem('currentUser', JSON.stringify(user))
-    localStorage.setItem('currentUser', JSON.stringify(user))
-    
-    this.showMessage(`Successfully signed in with ${provider}!`, 'success')
-  }
-
-  async simulateEmailSignIn(email) {
-    this.state.isLoading = true
-
-    await new Promise(resolve => setTimeout(resolve, 2000))
-
-    const user = {
-      id: Math.random().toString(36).substr(2, 9),
-      name: email.split('@')[0],
-      email: email,
-      provider: 'email',
-      avatar: null
-    }
-
-    this.state.currentUser = user
-    this.state.isAuthenticated = true
-    this.state.isLoading = false
-
-    localStorage.setItem('currentUser', JSON.stringify(user))
-    this.showMessage('Check your email for the sign-in link!', 'success')
-  }
+  // ----------------------------------------------------------
+  // Sign out
+  // ----------------------------------------------------------
 
   signOut() {
-    this.state.currentUser = null
-    this.state.isAuthenticated = false
-    localStorage.removeItem('currentUser')
-    this.showMessage('You have been signed out.', 'info')
+    const token = localStorage.getItem(TOKEN_KEY);
+
+    this.state.currentUser = null;
+    this.state.isAuthenticated = false;
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(USER_KEY);
+
+    // Best-effort backend logout
+    if (token) {
+      fetch(`${AUTH_API}/logout`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` }
+      }).catch(() => {});
+    }
+
+    this.showMessage('You have been signed out.', 'info');
+  }
+
+  // ----------------------------------------------------------
+  // Helpers — same public API as before
+  // ----------------------------------------------------------
+
+  getToken() {
+    return localStorage.getItem(TOKEN_KEY);
+  }
+
+  authHeaders() {
+    const t = this.getToken();
+    return t ? { Authorization: `Bearer ${t}` } : {};
   }
 
   showMessage(message, type = 'info') {
-    const toast = document.createElement('div')
-    toast.className = `toast-message toast-${type}`
-    toast.textContent = message
-    
+    const toast = document.createElement('div');
+    toast.className = `toast-message toast-${type}`;
+    toast.textContent = message;
+
     Object.assign(toast.style, {
       position: 'fixed',
       top: '80px',
       right: '20px',
-      background: type === 'success' ? '#4CAF50' : type === 'error' ? '#f44336' : '#2196F3',
+      background: type === 'success' ? '#4CAF50'
+                : type === 'error'   ? '#f44336'
+                : '#2196F3',
       color: 'white',
       padding: '12px 20px',
       borderRadius: '8px',
       zIndex: '1003'
-    })
+    });
 
-    document.body.appendChild(toast)
-
+    document.body.appendChild(toast);
     setTimeout(() => {
-      if (toast.parentNode) {
-        toast.parentNode.removeChild(toast)
-      }
-    }, 3000)
+      if (toast.parentNode) toast.parentNode.removeChild(toast);
+    }, 3000);
   }
 
-  getCurrentUser() {
-    return this.state.currentUser
-  }
-
-  getIsAuthenticated() {
-    return this.state.isAuthenticated
-  }
+  getCurrentUser()     { return this.state.currentUser; }
+  getIsAuthenticated() { return this.state.isAuthenticated; }
+  getIsLoading()       { return this.state.isLoading; }
 }
 
-export const auth = new AuthManager()
+export const auth = new AuthManager();

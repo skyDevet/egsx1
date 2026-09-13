@@ -11,13 +11,18 @@ export default defineConfig(({ mode }) => {
     server: { 
       host: true, 
       port: 3000,
-      // Proxy API requests to Express server
+      // Proxy API and auth requests to Cloudflare Worker
       proxy: {
-      '/api': {
-        target: 'https://worker.skyn4302.workers.dev',
-        changeOrigin: true,
-        secure: false
-      }
+        '/api': {
+          target: 'https://worker.skyn4302.workers.dev',
+          changeOrigin: true,
+          secure: false
+        },
+        '/auth': {
+          target: 'https://worker.skyn4302.workers.dev',
+          changeOrigin: true,
+          secure: false
+        }
       }
     },
     build: { 
