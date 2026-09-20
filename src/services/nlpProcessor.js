@@ -3,8 +3,8 @@
 // Sends explicit mode: "stage" | "answer" | "chat"
 // ============================================================
 
-const API_BASE = '/api/nlp';
-
+//const API_BASE = '/api/nlp';
+const API_BASE = 'https://worker.skyn4302.workers.dev/api/nlp';
 function genSessionId() {
   return 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
 }

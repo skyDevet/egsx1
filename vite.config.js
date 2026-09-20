@@ -3,14 +3,14 @@ import preact from '@preact/preset-vite'
 
 export default defineConfig(({ mode }) => {
   // Force GitHub Pages base
-  const baseUrl = 'https://sky.net.et/egsx1/'
+  const baseUrl = '/egsx1/'
   
   return {
     base: baseUrl,
     plugins: [preact()],
     server: { 
       host: true, 
-     // port: 3000,
+      port: 3000,
       // Proxy API and auth requests to Cloudflare Worker
       proxy: {
         '/api': {
