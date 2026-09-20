@@ -14,12 +14,14 @@ export default defineConfig(({ mode }) => {
       // Proxy API and auth requests to Cloudflare Worker
       proxy: {
         '/api': {
-          target: 'https://worker.skyn4302.workers.dev',
+        target: 'https://worker.skyn4302.workers.dev',
+         // target:'http://127.0.0.1:4000',
           changeOrigin: true,
           secure: false
         },
         '/auth': {
-          target: 'https://worker.skyn4302.workers.dev',
+         target: 'https://worker.skyn4302.workers.dev',
+         // target:'http://127.0.0.1:4000',
           changeOrigin: true,
           secure: false
         }
