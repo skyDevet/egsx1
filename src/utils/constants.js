@@ -3,11 +3,12 @@ import { useState, useEffect } from 'preact/hooks'
 const translations = {
   en: {
     faydaPlaceholder: 'eg ፦ 68912471268',
-    vidgen:'generate advertizement video from photos',
-           acpprvd:'academic paper review',
-      vgovdoc:'Verify government documents',
-      analgdoc:'Analyze legal documents',
-    iftmscard:'integrated freight management service',
+    vidgen:   'video generation',
+acpprvd:  'document analysis',
+iftmscard:'iftms',
+vgovdoc:  'document analysis',
+analgdoc: 'document analysis',
+    iftmscard:'iftms',
       welcome: 'Welcome to AGIS',
     welcomeDescription: 'Advanced Government services',
     welcomeMessage: 'Hello! How can I help you today?',

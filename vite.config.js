@@ -20,8 +20,8 @@ export default defineConfig(({ mode }) => {
           secure: false
         },
         '/auth': {
-         target: 'https://worker.skyn4302.workers.dev',
-         // target:'http://127.0.0.1:4000',
+        // target: 'https://worker.skyn4302.workers.dev',
+          target:'http://127.0.0.1:4000',
           changeOrigin: true,
           secure: false
         }

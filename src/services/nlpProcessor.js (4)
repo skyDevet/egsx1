@@ -1,15 +1,10 @@
 // ============================================================
-// nlpProcessor.js (CLIENT)
-// Talks to Cloudflare Worker at /api/nlp
-// Modes: "stage" | "answer" | "chat"
+// nlpProcessor.js (frontend)
+// Sends explicit mode: "stage" | "answer" | "chat"
 // ============================================================
 
-//const API_BASE = 'https://worker.skyn4302.workers.dev/api/nlp';
- const API_BASE = 'http://127.0.0.1:4000/api/nlp';
-
-// ============================================================
-// SESSION ID
-// ============================================================
+//const API_BASE = '/api/nlp';
+const API_BASE = 'https://worker.skyn4302.workers.dev/api/nlp';
 function genSessionId() {
   return 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
 }
@@ -19,18 +14,9 @@ let sessionId =
   genSessionId();
 if (typeof localStorage !== 'undefined') localStorage.setItem('nlp_session_id', sessionId);
 
-export function getSessionId() { return sessionId; }
-export function clearSessionId() {
-  if (typeof localStorage !== 'undefined') localStorage.removeItem('nlp_session_id');
-  sessionId = genSessionId();
-  if (typeof localStorage !== 'undefined') localStorage.setItem('nlp_session_id', sessionId);
-}
-
 let currentLanguage = 'en';
 
-// ============================================================
-// SERVICE ALIASES
-// ============================================================
+// Alias → canonical service id (must match DEFAULT_SERVICES keys on server)
 const SERVICE_ALIASES = {
   'iftms': 'iftms', 'iftms card': 'iftms', 'iftms service': 'iftms',
   'iftms - freight transport': 'iftms',
@@ -82,30 +68,6 @@ function normalizeInput(text) {
   return n;
 }
 
-// ============================================================
-// LOW-LEVEL POST
-// ============================================================
-async function postJson(path, body) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Session-ID': sessionId
-    },
-    body: JSON.stringify(body)
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.message || err.error || `HTTP ${res.status}`);
-  }
-  const body2 = await res.json();
-  return body2.data || body2;
-}
-
-// ============================================================
-// PUBLIC API
-// ============================================================
-
 export async function init() {
   try {
     const res = await fetch(`${API_BASE}/health`);
@@ -120,8 +82,9 @@ export async function init() {
 /**
  * chat(msg, file, serviceHint)
  *
- *  serviceHint — canonical service id from a suggestion-card click.
+ *  serviceHint — canonical service id from a suggestion card click.
  *                Presence ⇒ mode = "stage" (present current step, no validation)
+ *
  *  bare service name in text ⇒ mode = "stage"
  *  otherwise ⇒ mode = "answer" (or "chat" if no service context)
  */
@@ -145,72 +108,35 @@ export async function chat(msg, file, serviceHint = null) {
     mode = isStage ? 'stage' : 'answer';
   }
 
-  return postJson('/chat', {
-    message: normalizedMsg,
-    file: file ? { name: file.name, size: file.size } : null,
+  const payload = {
+    text: normalizedMsg,
     sessionId,
+    language: currentLanguage,
     mode,
     serviceId: serviceId || null,
-    language: currentLanguage
+    file: file ? { name: file.name, size: file.size } : null
+  };
+
+  console.log(`📤 mode=${mode} service=${serviceId || '-'} text="${normalizedMsg}"`);
+
+  const res = await fetch(`${API_BASE}/process`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Session-ID': sessionId
+    },
+    body: JSON.stringify(payload)
   });
-}
 
-// Explicit staging helper (used by suggestion-card clicks)
-export async function stageService(serviceId) {
-  return postJson('/chat', {
-    message: null,
-    file: null,
-    sessionId,
-    mode: 'stage',
-    serviceId,
-    language: currentLanguage
-  });
-}
-
-// Explicit answer helper
-export async function sendAnswer(message) {
-  return postJson('/chat', {
-    message,
-    file: null,
-    sessionId,
-    mode: 'answer',
-    serviceId: null,
-    language: currentLanguage
-  });
-}
-
-// Free-form message
-export async function sendMessage(message, file = null) {
-  return postJson('/chat', {
-    message,
-    file: file ? { name: file.name, size: file.size } : null,
-    sessionId,
-    mode: 'chat',
-    serviceId: null,
-    language: currentLanguage
-  });
-}
-
-// Resume after navigation / reload
-export async function resumeSession() {
-  return postJson('/resume', { sessionId, language: currentLanguage });
-}
-
-// Ask server whether this session has unfinished work
-export async function fetchSessionStatus() {
-  return postJson('/session-status', { sessionId });
-}
-
-// End the session
-export async function endSession() {
-  try {
-    await postJson('/end-session', { sessionId });
-  } finally {
-    clearSessionId();
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || err.error || `HTTP ${res.status}`);
   }
+
+  const body = await res.json();
+  return body.data || body;
 }
 
-// Legacy alias kept so existing imports don't break
 export async function processMessage(msg, file, serviceHint) {
   return chat(msg, file, serviceHint);
 }
@@ -218,18 +144,14 @@ export async function processMessage(msg, file, serviceHint) {
 export async function getAvailableServices() {
   const res = await fetch(`${API_BASE}/services`);
   const body = await res.json();
-  return body.data || body || [];
+  return body.data || [];
 }
 
 export function resetService(serviceId) {
-  return postJson('/reset', { sessionId, serviceId }).catch(() => null);
+  return fetch(`${API_BASE}/reset/${serviceId}`, { method: 'POST' }).then(r => r.json());
 }
 
-export function setLanguage(lang) {
-  currentLanguage = lang === 'am' ? 'am' : 'en';
-  // best-effort notify server
-  postJson('/set-language', { sessionId, language: currentLanguage }).catch(() => {});
-}
+export function setLanguage(lang) { currentLanguage = lang === 'am' ? 'am' : 'en'; }
 export function getLanguage() { return currentLanguage; }
 export function isServiceComplete() { return false; }
 export function markServiceComplete() {}
@@ -237,12 +159,6 @@ export function markServiceComplete() {}
 export const nlpProcessor = {
   chat,
   processMessage,
-  stageService,
-  sendAnswer,
-  sendMessage,
-  resumeSession,
-  fetchSessionStatus,
-  endSession,
   init,
   getAvailableServices,
   resetService,
@@ -250,8 +166,6 @@ export const nlpProcessor = {
   markServiceComplete,
   setLanguage,
   getLanguage,
-  getSessionId,
-  clearSessionId,
   detectService,
   isEmptyInput,
   normalizeInput

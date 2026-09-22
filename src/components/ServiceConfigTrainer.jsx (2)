@@ -4,7 +4,7 @@
 
 import { useState, useEffect } from 'preact/hooks';
 import { db } from '../services/database.js'; // ← ONLY for chat history
-import { getServiceConfigDB, getLocalized } from '../services/serviceConfigDB.js'; // ← ONLY for services
+import { getServiceConfigDB, getLocalized } from '../services/serviceConfigDB2.js'; // ← ONLY for services
 
 // ============================================================
 // DATA MASKING UTILITIES
