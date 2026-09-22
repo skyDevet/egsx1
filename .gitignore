@@ -7,8 +7,8 @@ dist/
 .vite/
 build/
 .capacitor/
-worker/
-server/
+
+
 # OS files
 .DS_Store
 Thumbs.db
