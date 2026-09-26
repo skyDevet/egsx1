@@ -1,0 +1,717 @@
+// src/services/tess.js
+// Slim OCR + classification fallback for docExtractor.js
+// - Tesseract.js v7.0.0 (CDN, no IndexedDB, no language-file caching)
+// - No VIN decoding (moved to server side)
+// - Forwards classified results into the nlpProcessor workflow
+// - VERBOSE LOGGING for dev — filter console by "[tess]"
+//
+// NOTE on langPath:
+//   The `tesseract.js` npm package does NOT ship *.traineddata.gz files.
+//   Language data lives in the separate `@tesseract.js-data/<lang>` package.
+//   We let Tesseract.js resolve it by default (no langPath option) — it
+//   auto-fetches from https://cdn.jsdelivr.net/npm/@tesseract.js-data/<lang>/4.0.0
+
+import { createWorker } from 'tesseract.js';
+import { processMessage } from './nlpProcessor';
+
+// ============================================================
+// LOG HELPERS
+// ============================================================
+const TAG = '[tess]';
+const log   = (...a) => console.log(TAG, ...a);
+const warn  = (...a) => console.warn(TAG, ...a);
+const error = (...a) => console.error(TAG, ...a);
+const group = (label) => console.group(TAG, label);
+const groupEnd = () => console.groupEnd();
+const timer = (label) => {
+    const t0 = performance.now();
+    log(`⏱️  ${label} … start`);
+    return () => {
+        const ms = (performance.now() - t0).toFixed(1);
+        log(`⏱️  ${label} … done in ${ms}ms`);
+        return ms;
+    };
+};
+const trunc = (s, n = 180) => {
+    if (typeof s !== 'string') return s;
+    return s.length > n ? s.slice(0, n) + `…(+${s.length - n})` : s;
+};
+
+// ============================================================
+// CDN CONSTANTS
+// ============================================================
+const TESS_VERSION = '7.0.0';
+const TESS_WORKER  = `https://cdn.jsdelivr.net/npm/tesseract.js@${TESS_VERSION}/dist/worker.min.js`;
+const TESS_CORE    = `https://cdn.jsdelivr.net/npm/tesseract.js-core@${TESS_VERSION}`;
+// NOTE: no TESS_LANG — see file header. Omit langPath and tesseract.js
+// will resolve @tesseract.js-data/<lang>/4.0.0 automatically.
+
+class TessAna {
+    constructor() {
+        log('🧱 constructor: new TessAna()');
+        this.tesseractWorker = null;
+        this.isInitializedT = false;
+        this.initializationPromise = null;
+    }
+
+    async init() {
+        log('▶ init()');
+        if (this.isInitializedT) {
+            log('  ↷ already initialized — skipping');
+            return;
+        }
+        if (typeof createWorker === 'undefined') {
+            error('❌ createWorker is undefined — tesseract.js import broken');
+            throw new Error('Tesseract.js not loaded. Please check your imports.');
+        }
+        log('  ✅ createWorker available');
+        await this.initializeTesseract();
+        log('  ✅ init() complete');
+    }
+
+    async initializeTesseract() {
+        log('▶ initializeTesseract()');
+
+        if (this.initializationPromise) {
+            log('  ↷ init already in-flight — returning existing promise');
+            return this.initializationPromise;
+        }
+        if (this.isInitializedT) {
+            log('  ↷ already initialized — returning');
+            return;
+        }
+
+        this.initializationPromise = (async () => {
+            const done = timer('createWorker(eng+amh)');
+            try {
+                log(`  🔵 creating worker — Tesseract.js v${TESS_VERSION}`);
+                log('     workerPath:', TESS_WORKER);
+                log('     corePath  :', TESS_CORE);
+                log('     langPath  : (default — @tesseract.js-data/<lang>/4.0.0)');
+
+                this.tesseractWorker = await createWorker('eng+amh', 1, {
+                    workerPath: TESS_WORKER,
+                    corePath:   TESS_CORE,
+                    // langPath deliberately omitted — see file header
+                    logger: (m) => this.updateOCRProgress(m),
+                });
+
+                done();
+                this.isInitializedT = true;
+                log(`  ✅ worker created — Tesseract.js v${TESS_VERSION}`);
+            } catch (e) {
+                done();
+                error('❌ worker creation FAILED');
+                error('   message:', e.message);
+                error('   name   :', e.name);
+                error('   stack  :', e.stack);
+                error('   full   :', e);
+                this.isInitializedT = false;
+                this.tesseractWorker = null;
+                throw new Error(`OCR engine failed to start: ${e.message}`);
+            } finally {
+                this.initializationPromise = null;
+            }
+        })();
+
+        return this.initializationPromise;
+    }
+
+    updateOCRProgress(progress) {
+        if (!progress || !progress.status) return;
+
+        const pct = (typeof progress.progress === 'number')
+            ? ` ${(progress.progress * 100).toFixed(0)}%`
+            : '';
+        log(`   ⏳ tesseract: ${progress.status}${pct}`);
+
+        const loadingEl = document.getElementById('loading');
+        if (!loadingEl) return;
+
+        switch (progress.status) {
+            case 'loading tesseract core':
+                loadingEl.textContent = 'Loading OCR engine...';
+                break;
+            case 'initializing tesseract':
+                loadingEl.textContent = 'Initializing OCR...';
+                break;
+            case 'loading language traineddata':
+                loadingEl.textContent = 'Loading language data...';
+                break;
+            case 'initializing api':
+                loadingEl.textContent = 'Finalizing OCR...';
+                break;
+            case 'recognizing text':
+                loadingEl.textContent = `OCR Processing: ${Math.round(progress.progress * 100)}%`;
+                break;
+        }
+    }
+
+    async analyzeDocument(file) {
+        const done = timer('analyzeDocument');
+        log('▶ analyzeDocument()');
+        log('  name :', file?.name);
+        log('  type :', file?.type);
+        log('  size :', file?.size, 'bytes');
+
+        try {
+            this.showLoading(true);
+
+            let text = '';
+            let usedOCR = false;
+
+            if (file.type.startsWith('image/')) {
+                log('  🖼️ image branch — initializing + OCR');
+                await this.initializeTesseract();
+                text = await this.performOCR(file);
+                usedOCR = true;
+                log(`  ✅ OCR complete — chars=${text.length}`);
+            } else if (file.type === 'application/pdf') {
+                error('  ❌ PDF not supported in tess.js');
+                throw new Error('PDF processing handled by external PDF.js implementation');
+            } else {
+                error('  ❌ unsupported file type:', file.type);
+                throw new Error('Unsupported file type. Please use image files (JPEG, PNG, etc.)');
+            }
+
+            log('  ▶ classifyDocument() [awaiting]');
+            const analysis = await this.classifyDocument(text, file.name);
+            log('  ✅ classifyDocument returned:', analysis);
+
+            // classifyDocument may have returned the processMessage result
+            // directly (iftms branch). Only patch the local-analysis shape.
+            if (analysis && typeof analysis === 'object') {
+                analysis.fileName = analysis.fileName || file.name;
+                analysis.fileSize = analysis.fileSize || file.size;
+                analysis.usedOCR  = usedOCR;
+                analysis.pages    = analysis.pages || 1;
+            }
+
+            done();
+            log('  ✅ analyzeDocument result:');
+            log('     documentType:', analysis?.documentType);
+            log('     category    :', analysis?.category);
+            log('     confidence  :', analysis?.confidence);
+            log('     language    :', analysis?.language);
+            log('     fields found:', Object.keys(analysis?.extractedData || {}).length);
+            log('     extractedData:', analysis?.extractedData);
+
+            this.showLoading(false);
+            return analysis;
+        } catch (e) {
+            done();
+            this.showLoading(false);
+            error('❌ analyzeDocument FAILED');
+            error('   message:', e.message);
+            error('   stack  :', e.stack);
+            throw new Error(`Document analysis failed: ${e.message}`);
+        }
+    }
+
+    async performOCR(imageFile) {
+        log('▶ performOCR()');
+
+        if (!this.isInitializedT || !this.tesseractWorker) {
+            log('  ↷ not initialized — initializing now');
+            await this.initializeTesseract();
+        }
+
+        const done = timer('worker.recognize');
+        try {
+            log('  🔍 recognizing:', imageFile.name);
+            const result = await this.tesseractWorker.recognize(imageFile);
+            done();
+
+            const text = result?.data?.text || '';
+            const conf = result?.data?.confidence;
+            log(`  ✅ OCR done — chars=${text.length} conf=${conf}`);
+            log(`  📝 first 200 chars: ${JSON.stringify(trunc(text, 200))}`);
+            return text;
+        } catch (e) {
+            done();
+            error('❌ performOCR FAILED');
+            error('   message:', e.message);
+            error('   stack  :', e.stack);
+            throw new Error(`OCR failed: ${e.message}`);
+        }
+    }
+
+    getWorkerStatus() {
+        const s = {
+            isInitialized: this.isInitializedT,
+            worker: this.tesseractWorker ? 'Active' : 'None',
+            initializationPromise: this.initializationPromise ? 'Pending' : 'None'
+        };
+        log('getWorkerStatus →', s);
+        return s;
+    }
+
+    // THIS is async — processMessage() is awaited inside.
+    async classifyDocument(text, fileName) {
+        log('▶ classifyDocument() [async]');
+        log('  fileName:', fileName);
+        log('  text length:', text.length);
+
+        let type = "General Document";
+        let typeClass = "type-other";
+        let confidence = 0.3;
+        let category = "other";
+        const detectedLanguage = this.detectLanguage(text);
+
+        log('  language detected:', detectedLanguage);
+
+        if (/(የሰሌዳ\s*ቁጥር|የተሽከርካሪው|የሻንሺ\s*ቁጥር|chassis\s*number|vehicle\s*description|plate\s*number)/i.test(text)) {
+            log('  🎯 matched → Vehicle Registration Document');
+            type = "Vehicle Registration Document";
+            typeClass = "type-government";
+            confidence = 0.9;
+            category = "transportation";
+        }
+        if (/(የመድን|ፖሊሲው\s*ቁጥር|policy\s*number|date\s*of|issuance|የአረቦን\s*መጠን|premium\s*tariff|policy\s*period)/i.test(text)) {
+            log('  🎯 matched → Insurance Policy Document');
+            type = "Insurance Policy Document";
+            typeClass = "type-insurance";
+            confidence = 0.9;
+            category = "insurance";
+        }
+        else if (/(abstract|introduction|methodology|results|discussion|conclusion|references|bibliography)/i.test(text)) {
+            log('  🎯 matched → Academic Paper');
+            type = "Academic Paper";
+            typeClass = "type-research";
+            confidence = 0.8;
+            category = "academic";
+        }
+        else if (/(agreement|contract|clause|party|whereas|warranty|jurisdiction)/i.test(text)) {
+            log('  🎯 matched → Legal Document');
+            type = "Legal Document";
+            typeClass = "type-legal";
+            confidence = 0.7;
+            category = "legal";
+        }
+        else if (/(license|permit|national id|fayda id|government|identification|ዜግነት|ኢትዮጵያ)/i.test(text)) {
+            log('  🎯 matched → Government Document');
+            type = "Government Document";
+            typeClass = "type-government";
+            confidence = 0.75;
+            category = "government";
+        }
+        else if (/(invoice|receipt|payment|amount|balance|statement|tax)/i.test(text)) {
+            log('  🎯 matched → Financial Document');
+            type = "Financial Document";
+            typeClass = "type-financial";
+            confidence = 0.6;
+            category = "financial";
+        } else {
+            log('  ↷ no classifier matched — falling back to "General Document"');
+        }
+
+        log('  ▶ extractTopics()');
+        const topics = this.extractTopics(text);
+        log('     topics:', topics);
+
+        log('  ▶ extractKeywords()');
+        const keywords = this.extractKeywords(text);
+        log('     keyword count:', keywords.length);
+
+        log('  ▶ extractVehicleData()');
+        const extractedData = this.extractVehicleData(text);
+        log('     extractedData keys:', Object.keys(extractedData));
+
+        // Hand-off into the nlpProcessor workflow when intent is iftms
+        const currentIntent = sessionStorage.getItem('currentService');
+        log('  sessionStorage.currentService =', currentIntent);
+
+        if (currentIntent === 'iftms') {
+            const Edata = {
+                documentType: type,
+                typeClass:    typeClass,
+                confidence:   confidence,
+                category:     category,
+                extractedData,
+                language:     detectedLanguage,
+                fileName,
+            };
+            log('  🔀 iftms intent — handing off to processMessage()');
+            log('     Edata:', Edata);
+
+            const out = await processMessage(currentIntent, Edata, false, true);
+            log('  ✅ processMessage returned:', out);
+            return out;
+        }
+
+        log('  ↷ no iftms intent — returning local analysis object');
+        return {
+            documentName: fileName.replace(/\.[^/.]+$/, "") || 'Unknown Document',
+            documentType: type,
+            typeClass:    typeClass,
+            confidence:   confidence,
+            category:     category,
+            language:     detectedLanguage,
+            topics,
+            keywords,
+            extractedData,
+            summary:   this.generateSummary(type, text, fileName, topics, extractedData, detectedLanguage),
+            wordCount: text.split(/\s+/).filter(w => w.length > 0).length,
+            timestamp: new Date().toISOString(),
+            tesseractVersion: TESS_VERSION,
+        };
+    }
+
+    detectLanguage(text) {
+        const hasEthiopic = /[ሀ-ፕ]/.test(text);
+        const hasLatin    = /[a-zA-Z]/.test(text);
+        if (hasEthiopic && hasLatin) return 'amh+eng';
+        if (hasEthiopic) return 'amh';
+        if (hasLatin)    return 'eng';
+        return 'unknown';
+    }
+
+    extractVehicleData(text) {
+        log('▶ extractVehicleData()');
+        const vehicleData = {};
+        const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 2);
+        log('  lines to scan:', lines.length);
+
+        const keyPatterns = {
+            plateNumber:      { keys: ['የሰሌዳ\\s*ቁጥር', 'plate\\s*number'] },
+            ownerName:        { keys: ['ስም', 'name'] },
+            chassisNumber:    { keys: ['የሻንሺ\\s*ቁጥር', 'chassis\\s*number'] },
+            motorNumber:      { keys: ['የሞተር\\s*ቁጥር', 'motor\\s*number'] },
+            vehicleModel:     { keys: ['የተሽ[\\/]?\\s*ሞዴል', 'vehicle\\s*model'] },
+            previousPlate:    { keys: ['የቀድሞ\\s*ሰሌዳ\\s*ቁጥር', 'previous\\s*plate'] },
+            gender:           { keys: ['ጾታ', 'gender'] },
+            nationality:      { keys: ['ዜግነት', 'nationality'] },
+            city:             { keys: ['ከተማ', 'city'] },
+            subcity:          { keys: ['ክ[\\/]\\s*ከተማ', 'subcity'] },
+            woreda:           { keys: ['ቀበሌ[\\/]\\s*ወረዳ', 'woreda'] },
+            phone:            { keys: ['ሰልክ', 'phone'] },
+            vehicleType:      { keys: ['የመኪና\\s*አይነት', 'vehicle\\s*type'] },
+            bodyType:         { keys: ['የአካሉ\\s*አይነት', 'body\\s*type'] },
+            fuelType:         { keys: ['የነዳጅ\\s*ዓይነት', 'fuel\\s*type'] },
+            color:            { keys: ['ቀለም', 'color'] },
+            manufacturer:     { keys: ['የተሰራበት\\s*ሀገር', 'manufacturer'] },
+            manufactureYear:  { keys: ['የተሰራበት\\s*ዘመን', 'manufacture\\s*year'] },
+            enginePower:      { keys: ['የሞተር\\s*የፈረስ\\s*ጉልበት', 'engine\\s*power'] },
+            totalWeight:      { keys: ['የተሽ[\\/]\\s*ጠቅ[\\/]\\s*ክብደት', 'total\\s*weight'] },
+            unladenWeight:    { keys: ['ነጠላ\\s*ክብደት', 'unladen\\s*weight'] },
+            loadCapacity:     { keys: ['የጭነት\\s*መጠን', 'load\\s*capacity'] },
+            engineCapacity:   { keys: ['የሞተር\\s*ችሎታ[\\/]\\s*ሲሲ', 'engine\\s*capacity'] },
+            cylinderCount:    { keys: ['የሲሊንደር\\s*ብዛት', 'cylinder\\s*count'] },
+            permittedWork:    { keys: ['የተፈቀደለት\\s*የስራ\\s*ጸባይ', 'permitted\\s*work'] },
+        };
+
+        lines.forEach((line, idx) => {
+            for (const [field, patternInfo] of Object.entries(keyPatterns)) {
+                if (vehicleData[field]) continue;
+                for (const key of patternInfo.keys) {
+                    const keyRegex = new RegExp(`${key}[\\s:]*([^\\n]{3,30})`, 'i');
+                    const match = line.match(keyRegex);
+                    if (match && match[1]) {
+                        const value = match[1].trim().replace(/^[:\s\-]+|[:\s\-]+$/g, '');
+                        if (value) {
+                            vehicleData[field] = value;
+                            log(`  ✅ [line ${idx}] ${field} = ${JSON.stringify(value)}`);
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        log('  ▶ extractSeparatedKeyValues()');
+        this.extractSeparatedKeyValues(lines, vehicleData);
+
+        const cleaned = this.validateAndCleanVehicleData(vehicleData);
+        log('  ✅ extractVehicleData done — fields:', Object.keys(cleaned));
+        return cleaned;
+    }
+
+    extractInsuranceData(text) {
+        log('▶ extractInsuranceData()');
+        const insuranceData = {};
+        const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 2);
+        log('  lines to scan:', lines.length);
+
+        const INSURANCE_PATTERNS = {
+            certificateNumber: { keys: ['የሰርተፊኬት\\s*ቁጥር', 'certificate\\s*number', 'CERTIFICATE\\s*NUMBER', 'Certificate\\s*No'] },
+            insuredName:       { keys: ['የመድን\\s*ገቢው\\s*ስም', 'name\\s*of\\s*insured', 'INSURED', 'NAME\\s*OF\\s*INSURED', 'የመድን\\s*ገቢው'] },
+            plateNumber:       { keys: ['የሠሌዳ\\s*ቁጥር', 'plate\\s*number', 'PLATE\\s*NUMBER', 'የሰሌዳ\\s*ቁጥር'] },
+            vehicleType:       { keys: ['የተሸከርካሪ\\s*እይተት', 'vehicle\\s*type', 'VEHICLE\\s*TYPE', 'የተሽከርካሪ\\s*አይነት'] },
+            policyNumber:      { keys: ['የመድን\\s*ፖሊሲው\\s*ቁጥር', 'policy\\s*number', 'INSURER\\s*POLICY\\s*No', 'POLICY\\s*NUMBER'] },
+            dateOfIssuance:    { keys: ['የተሰጠበት\\s*ቀን', 'date\\s*of\\s*issuance', 'DATE\\s*OF\\s*ISSUANCE'] },
+            policyPeriodFrom:  { keys: ['ፖሊሲው\\s*ዘመን\\s*ከ', 'policy\\s*period\\s*from', 'FROM'] },
+            policyPeriodTo:    { keys: ['እስከ', 'to', 'TO'] },
+            premiumAmount:     { keys: ['የአረቦን\\s*መጠን', 'premium', 'PREMIUM\\s*TARIF', 'premium\\s*tariff'] },
+            chassisNumber:     { keys: ['የቻንሲ\\s*ቁጥር', 'chassis\\s*number', 'CHASSIS\\s*NUMBER'] },
+            engineNumber:      { keys: ['የሞተር\\s*ቁጥር', 'engine\\s*number', 'ENGINE\\s*NUMBER'] },
+            phoneNumber:       { keys: ['ሞባይል\\s*ቁጥር', 'phone\\s*number', 'PHONE\\s*NUMBER', 'ስልክ'] },
+            region:            { keys: ['ክልል', 'region', 'REGION', 'አድራሻ'] },
+            subcity:           { keys: ['ክ[\\/]\\s*ከተማ', 'ክፍለ\\s*ከተማ', 'subcity', 'SUB\\s*CITY'] },
+            woreda:            { keys: ['ቀበሌ[\\/]\\s*ወረዳ', 'woreda'] },
+            kebele:            { keys: ['ቀበሌ', 'kebele', 'KEBELE'] },
+            insurerName:       { keys: ['የመድን\\s*ሰጪው\\s*ስም', 'name\\s*of\\s*insurer', 'NAME\\s*OF\\s*INSURER'] },
+            carryingCapacity:  { keys: ['የመጫን\\s*አቅም', 'carrying\\s*capacity', 'CARRYING\\s*CAPACITY'] },
+            persons:           { keys: ['ስዎች', 'persons', 'PERSONS'] },
+        };
+
+        lines.forEach((line, idx) => {
+            for (const [field, patternInfo] of Object.entries(INSURANCE_PATTERNS)) {
+                if (insuranceData[field]) continue;
+                for (const key of patternInfo.keys) {
+                    const keyRegex = new RegExp(`${key}[\\s:]*([^\\n]{3,30})`, 'i');
+                    const match = line.match(keyRegex);
+                    if (match && match[1]) {
+                        const value = match[1].trim().replace(/^[:\s\-]+|[:\s\-]+$/g, '');
+                        if (value) {
+                            insuranceData[field] = value;
+                            log(`  ✅ [line ${idx}] ${field} = ${JSON.stringify(value)}`);
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        log('  ▶ extractSeparatedKeyValues()');
+        this.extractSeparatedKeyValues(lines, insuranceData);
+
+        const cleaned = this.validateAndCleanVehicleData(insuranceData);
+        log('  ✅ extractInsuranceData done — fields:', Object.keys(cleaned));
+        return cleaned;
+    }
+
+    extractSeparatedKeyValues(lines, data) {
+        log('▶ extractSeparatedKeyValues()');
+
+        if (!data.chassisNumber) {
+            const i = lines.findIndex(l => /የሻንሺ|chassis/i.test(l));
+            log('  chassis key at line:', i);
+            if (i !== -1) {
+                for (let j = i + 1; j <= Math.min(lines.length - 1, i + 5); j++) {
+                    const vinMatch = lines[j].match(/([A-HJ-NPR-Z0-9]{17})/);
+                    if (vinMatch && !/phone|ሰልክ|0911/i.test(lines[j])) {
+                        data.chassisNumber = vinMatch[1];
+                        log(`  ✅ chassis(VIN) = ${vinMatch[1]} @ line ${j}`);
+                        break;
+                    }
+                    const chMatch = lines[j].match(/([A-Z0-9]{10,18})/);
+                    if (chMatch) {
+                        data.chassisNumber = chMatch[1];
+                        log(`  ✅ chassis = ${chMatch[1]} @ line ${j}`);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (!data.motorNumber) {
+            const i = lines.findIndex(l => /የሞተር|motor/i.test(l));
+            log('  motor key at line:', i);
+            if (i !== -1) {
+                for (let j = i + 1; j <= Math.min(lines.length - 1, i + 5); j++) {
+                    const m = lines[j].match(/(1SG400[\-\s]?[0-9A-Z]{7,9}|[A-Z0-9]{3,6}[\-\s]?[A-Z0-9]{5,10})/);
+                    if (m && !/phone|ሰልክ|0911/i.test(lines[j])) {
+                        data.motorNumber = m[1];
+                        log(`  ✅ motor = ${m[1]} @ line ${j}`);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (!data.manufactureYear) {
+            for (let i = 0; i < lines.length; i++) {
+                const y = lines[i].match(/(20[0-9]{2})/);
+                if (y && !/phone|ሰልክ/i.test(lines[i])) {
+                    data.manufactureYear = y[1];
+                    log(`  ✅ year = ${y[1]} @ line ${i}`);
+                    break;
+                }
+            }
+        }
+
+        if (!data.phone) {
+            const i = lines.findIndex(l => /ሰልክ|phone/i.test(l));
+            if (i !== -1) {
+                for (let j = Math.max(0, i - 2); j <= Math.min(lines.length - 1, i + 2); j++) {
+                    const p = lines[j].match(/([0-9]{8,10})/);
+                    if (p) {
+                        data.phone = p[1];
+                        log(`  ✅ phone = ${p[1]} @ line ${j}`);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    validateAndCleanVehicleData(data) {
+        const cleaned = { ...data };
+        Object.keys(cleaned).forEach(k => {
+            if (typeof cleaned[k] === 'string') {
+                cleaned[k] = cleaned[k].replace(/\s+/g, ' ').trim().replace(/^[:\-\s]+|[:\-\s]+$/g, '');
+            }
+        });
+        return cleaned;
+    }
+
+    extractTopics(text) {
+        const words = text.split(/\s+/);
+        const freq = {};
+        words.forEach(w => {
+            const c = w.replace(/[^\wሀ-ፕ]/g, '');
+            const min = /[ሀ-ፕ]/.test(c) ? 2 : 4;
+            if (c.length >= min && !this.isCommonWord(c)) freq[c] = (freq[c] || 0) + 1;
+        });
+        const out = Object.entries(freq).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([w]) => w);
+        log('   topics:', out);
+        return out;
+    }
+
+    extractKeywords(text) {
+        const words = text.toLowerCase().split(/\s+/);
+        const freq = {};
+        words.forEach(w => {
+            const c = w.replace(/[^\wሀ-ፕ]/g, '');
+            const min = /[ሀ-ፕ]/.test(c) ? 2 : 3;
+            if (c.length >= min) freq[c] = (freq[c] || 0) + 1;
+        });
+        const max = Math.max(1, ...Object.values(freq));
+        const out = Object.entries(freq).sort((a, b) => b[1] - a[1]).slice(0, 10)
+            .map(([term, count]) => ({ term, score: count / max }));
+        log('   keywords:', out.map(k => `${k.term}(${k.score.toFixed(2)})`).join(', '));
+        return out;
+    }
+
+    generateSummary(docType, text, title, topics, extractedData = {}, language) {
+        log('▶ generateSummary()');
+        const wordCount = text.split(/\s+/).filter(w => w.length > 0).length;
+        const topicStr = topics.slice(0, 3).join(', ');
+
+        let vehicleInfo = '';
+        if (docType === "Vehicle Registration Document" && Object.keys(extractedData).length > 0) {
+            const fields = Object.entries(extractedData)
+                .filter(([, v]) => v && String(v).length > 0)
+                .map(([k, v]) => `<div><strong>${this.formatFieldName(k)}:</strong> ${v}</div>`)
+                .join('');
+            vehicleInfo = `
+                <div class="vehicle-details">
+                    <h4>Extracted Vehicle Information:</h4>
+                    <div class="vehicle-grid">${fields}</div>
+                </div>`;
+        }
+
+        return `
+            <div class="document-summary">
+                <p><strong>${docType}</strong>: "${title}"</p>
+                <p>Language: ${language} | Words: ${wordCount}</p>
+                <p>Key topics: ${topicStr}</p>
+                ${vehicleInfo}
+                <p>Processed with Tesseract.js v${TESS_VERSION}</p>
+            </div>`;
+    }
+
+    formatFieldName(fieldName) {
+        const names = {
+            plateNumber: 'Plate Number', ownerName: 'Owner Name',
+            chassisNumber: 'Chassis Number', motorNumber: 'Motor Number',
+            vehicleModel: 'Vehicle Model', previousPlate: 'Previous Plate',
+            gender: 'Gender', nationality: 'Nationality', city: 'City',
+            subcity: 'Subcity', woreda: 'Woreda', phone: 'Phone',
+            vehicleType: 'Vehicle Type', bodyType: 'Body Type',
+            fuelType: 'Fuel Type', color: 'Color', manufacturer: 'Manufacturer',
+            manufactureYear: 'Manufacture Year', enginePower: 'Engine Power',
+            totalWeight: 'Total Weight', unladenWeight: 'Unladen Weight',
+            loadCapacity: 'Load Capacity', engineCapacity: 'Engine Capacity',
+            cylinderCount: 'Cylinder Count', permittedWork: 'Permitted Work',
+        };
+        return names[fieldName] || fieldName;
+    }
+
+    isCommonWord(word) {
+        const common = ['the','and','for','are','but','not','you','all','can','your',
+            'have','with','this','that','from','የ','አ','በ','እ','ወ','ከ','ለ','ማ','ነ','ስ'];
+        return common.includes(word.toLowerCase());
+    }
+
+    showLoading(show) {
+        const el = document.getElementById('loading');
+        if (el) {
+            el.style.display = show ? 'block' : 'none';
+            if (!show) el.textContent = 'Ready';
+        }
+    }
+
+    async destroy() {
+        log('▶ destroy()');
+        if (this.tesseractWorker) {
+            try {
+                await this.tesseractWorker.terminate();
+                log('  ✅ worker terminated');
+            } catch (e) {
+                warn('  ⚠️ terminate threw:', e.message);
+            }
+            this.tesseractWorker = null;
+            this.isInitializedT = false;
+        } else {
+            log('  ↷ no worker to terminate');
+        }
+    }
+}
+
+// ============================================================
+// SINGLETON
+// ============================================================
+log('🧱 module eval: creating singleton teSsAna');
+export const teSsAna = new TessAna();
+export default teSsAna;
+
+// ============================================================
+// ADAPTER used by docExtractor.js fallback path
+// ============================================================
+export async function extractWithTess(file) {
+    const FALLBACK_TAG = '[tess:fallback]';
+    const flog  = (...a) => console.log(FALLBACK_TAG, ...a);
+    const fwarn = (...a) => console.warn(FALLBACK_TAG, ...a);
+    const ferr  = (...a) => console.error(FALLBACK_TAG, ...a);
+
+    flog('╔══════════════════════════════════════════╗');
+    flog('║  extractWithTess() — FALLBACK ENGAGED    ║');
+    flog('╚══════════════════════════════════════════╝');
+    flog('file:', file?.name, '|', file?.type, '|', file?.size, 'bytes');
+
+    const t0 = performance.now();
+
+    try {
+        flog('▶ calling teSsAna.analyzeDocument(file)…');
+        const analysis = await teSsAna.analyzeDocument(file);
+
+        const ms = (performance.now() - t0).toFixed(1);
+        flog(`✅ analyzeDocument returned in ${ms}ms`);
+        flog('   analysis:', analysis);
+
+        const fields = analysis?.extractedData || {};
+        flog('   fields extracted:', Object.keys(fields).length, fields);
+
+        const result = {
+            fields,
+            raw: null,
+            source: 'tess',
+            documentType: analysis?.documentType || 'General Document',
+            language:     analysis?.language || 'unknown',
+            summary:      analysis?.summary || '',
+            confidence:   analysis?.confidence ?? 0.3,
+        };
+
+        flog('✅ extractWithTess returning:', result);
+        return result;
+    } catch (e) {
+        const ms = (performance.now() - t0).toFixed(1);
+        ferr(`❌ extractWithTess FAILED after ${ms}ms`);
+        ferr('   message:', e.message);
+        ferr('   name   :', e.name);
+        ferr('   stack  :', e.stack);
+        ferr('   full   :', e);
+        throw e;
+    }
+}

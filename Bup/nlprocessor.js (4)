@@ -1,13 +1,11 @@
 // ============================================================
-// nlprocessor.js - Server-side (Node.js local + Cloudflare Worker)
-// Session state persisted to Supabase via ./sessionStore.js
+// nlprocessor.js - Server-side (Cloudflare Worker)
 // ============================================================
 
 import { vinDecoder } from './vinDecoder.js';
 import { getServiceConfigDB } from './serviceConfigDB.js';
 import { executeStepApiActions, executeFieldApiActions } from './apiTasks.js';
 import { detectIntent } from './intent.js';
-import * as store from './sessionStore.js';
 
 // ============================================================
 // LANGUAGE
@@ -181,73 +179,30 @@ const DEFAULT_SERVICES = {
 };
 
 // ============================================================
-// STATE (in-memory cache + Supabase persistence)
+// STATE (per-session, in-memory)
 // ============================================================
 let currentService = 'iftms';
 let services = {};
 let servicesInitialized = false;
 let db = null;
 
-const sessionCache = new Map();
+const sessionStates = new Map();           // Map<sessionId, { [serviceId]: state }>
+const sessionAwaitingAnswer = new Map();   // Map<sessionId, { serviceId, since }>
+
+function getSessionStates(sessionId) {
+  if (!sessionStates.has(sessionId)) sessionStates.set(sessionId, {});
+  return sessionStates.get(sessionId);
+}
 
 let activeSessionId = 'default';
 function setActiveSession(sessionId) { if (sessionId) activeSessionId = sessionId; }
-
-async function getSessionEntry(sessionId) {
-  const sid = sessionId || activeSessionId;
-  if (sessionCache.has(sid)) return sessionCache.get(sid);
-
-  const loaded = await store.loadSession(sid);
-  const entry = {
-    states: loaded?.state || {},
-    awaiting: loaded?.awaiting || null
-  };
-  sessionCache.set(sid, entry);
-  return entry;
-}
-
-function getSessionEntrySync(sessionId) {
-  const sid = sessionId || activeSessionId;
-  if (!sessionCache.has(sid)) {
-    sessionCache.set(sid, { states: {}, awaiting: null });
-  }
-  return sessionCache.get(sid);
-}
-
-function persistSession(sessionId, { immediate = false } = {}) {
-  const sid = sessionId || activeSessionId;
-  const entry = sessionCache.get(sid);
-  if (!entry) return;
-  store.saveSession(sid, { state: entry.states, awaiting: entry.awaiting }, { immediate });
-}
-
-function getSessionStates(sessionId) {
-  return getSessionEntrySync(sessionId).states;
-}
-
-function getActiveStates() {
-  return getSessionStates(activeSessionId);
-}
+function getActiveStates() { return getSessionStates(activeSessionId); }
 
 function markAwaitingAnswer(sessionId, serviceId) {
-  const sid = sessionId || activeSessionId;
-  const entry = getSessionEntrySync(sid);
-  entry.awaiting = { serviceId, since: Date.now() };
-  persistSession(sid);
+  sessionAwaitingAnswer.set(sessionId, { serviceId, since: Date.now() });
 }
-
-function clearAwaitingAnswer(sessionId) {
-  const sid = sessionId || activeSessionId;
-  const entry = getSessionEntrySync(sid);
-  entry.awaiting = null;
-  persistSession(sid);
-}
-
-function isAwaitingAnswer(sessionId) {
-  const sid = sessionId || activeSessionId;
-  const entry = getSessionEntrySync(sid);
-  return !!entry.awaiting;
-}
+function clearAwaitingAnswer(sessionId) { sessionAwaitingAnswer.delete(sessionId); }
+function isAwaitingAnswer(sessionId) { return sessionAwaitingAnswer.has(sessionId); }
 
 // ============================================================
 // SERVICE INIT
@@ -934,7 +889,6 @@ async function executeAction(action, rawValue, originalMessage) {
 // PROCESS MESSAGE
 // ============================================================
 export async function processMessage(message, file) {
-  const sid = activeSessionId;
   try {
     console.log('📨 Processing:', message || '[file]');
     await initializeServices();
@@ -1041,102 +995,20 @@ export async function processMessage(message, file) {
       html: `<div class="error">❌ ${errorLabel} ${error.message || unknownError}</div>`,
       isStructured: true
     };
-  } finally {
-    try { persistSession(sid); } catch (e) { /* ignore */ }
   }
 }
 
-// ============================================================
-// PROCESS EXTRACTION  (new — entry point for mode:'document')
-// ============================================================
-export async function processExtractionX(extracted, meta = {}, sessionId) {
-  const sid = sessionId || activeSessionId;
-  if (sessionId) setActiveSession(sessionId);
-  await initializeServices();
-
-  console.log('📄 processExtraction:', {
-    sessionId: sid,
-    serviceId: currentService,
-    documentType: meta?.documentType,
-    language: meta?.language,
-    fieldCount: extracted ? Object.keys(extracted).length : 0,
-  });
-
-  const state = getState();
-  state.collectedData = state.collectedData || {};
-  state.collectedData.extraction = {
-    fields: extracted || {},
-    meta: meta || {},
-    receivedAt: new Date().toISOString()
-  };
-
-  // If we're sitting on a file_upload step, advance past it.
-  const step = getStep();
-  if (step && step.type === 'file_upload') {
-    state.currentStep = step.onValid?.nextStep || state.currentStep + 1;
-    state.currentFieldIndex = 0;
-  }
-
-  // Pre-fill the current field if the extracted payload has a matching key.
-  const currentField = getCurrentField();
-  if (currentField && extracted && extracted[currentField.name] != null) {
-    const value = extracted[currentField.name];
-    saveToState(currentField.name, value);
-    state.currentFieldIndex++;
-    console.log(`  ✅ pre-filled ${currentField.name} = ${value}`);
-  }
-
-  try { persistSession(sid); } catch (e) { /* ignore */ }
-
-  const fieldCount = extracted ? Object.keys(extracted).length : 0;
-  const docType = meta?.documentType || 'Document';
-
-  return {
-    text: `Extraction received: ${docType} (${fieldCount} field${fieldCount === 1 ? '' : 's'})`,
-    html: `<div>📄 <strong>${docType}</strong><br>Extracted ${fieldCount} field${fieldCount === 1 ? '' : 's'}</div>`,
-    isStructured: true,
-    extracted: extracted || {},
-    extractionMeta: meta || {},
-    serviceId: currentService
-  };
-}
-
-// ============================================================
-// PROCESS EXTRACTION — thin adapter
-// Converts the client's extracted document payload into the
-// message text that the normal chat pipeline consumes, then
-// routes it through chat() so all step logic, validation,
-// service config, and intent handling apply unchanged.
-// ============================================================
-export async function processExtractionY(extracted, meta = {}, sessionId) {
-  const lines = Object.entries(extracted || {})
-    .map(([k, v]) => `${k}: ${v}`)
-    .join('\n');
-
-  const message = lines || `no fields extracted from ${meta?.documentType || 'document'}`;
-
-  return chat(message, null, sessionId, 'answer', null);
-}
-
-export async function processExtraction(extracted, meta = {}, sessionId) {
-  const sid = sessionId || activeSessionId;
-  if (sessionId) setActiveSession(sessionId);
-  await initializeServices();
-  await getSessionEntry(sid);
-
-  const lines = Object.entries(extracted || {})
-    .map(([k, v]) => `${k}: ${v}`)
-    .join('\n');
-
-  const message = lines || `no fields extracted from ${meta?.documentType || 'document'}`;
-
-  // Do NOT call chat() — chat() clears `awaiting`, which belongs to
-  // the user's turn, not the extractor's. Call processMessage directly.
-  return processMessage(message, null);
-}
 // ============================================================
 // PUBLIC API
 // ============================================================
+
+/**
+ * chat(msg, file, sessionId, mode, serviceId)
+ *
+ *   mode = "stage"  → present current step, NO validation, mark awaiting answer
+ *   mode = "answer" → validate + advance
+ *   mode = "chat"   → free-form (auto-promoted to "answer" if mid-flow)
+ */
 
 export async function chat(msg, file, sessionId, mode = 'chat', serviceId = null) {
   try {
@@ -1144,8 +1016,7 @@ export async function chat(msg, file, sessionId, mode = 'chat', serviceId = null
     if (sessionId) setActiveSession(sessionId);
     await initializeServices();
 
-    await getSessionEntry(sid);
-
+    // ----- STAGE -----
     if (mode === 'stage') {
       if (serviceId && services[serviceId]) {
         currentService = serviceId;
@@ -1168,8 +1039,9 @@ export async function chat(msg, file, sessionId, mode = 'chat', serviceId = null
       return await stepIntro();
     }
 
+    // ----- Auto-promote chat → answer when mid-flow -----
     const states = getActiveStates();
-    getState();
+    getState(); // ← critical: materialize state before reading
     const svcState = states[currentService];
     const midFlow =
       svcState &&
@@ -1198,13 +1070,14 @@ export async function chat(msg, file, sessionId, mode = 'chat', serviceId = null
   }
 }
 
+/**
+ * resume(sessionId) — re-stage current prompt after navigation/reload.
+ */
 export async function resume(sessionId) {
   try {
     const sid = sessionId || activeSessionId;
     if (sessionId) setActiveSession(sessionId);
     await initializeServices();
-
-    await getSessionEntry(sid);
 
     const states = getActiveStates();
     getState();
@@ -1234,12 +1107,13 @@ export async function resume(sessionId) {
   }
 }
 
+/**
+ * getSessionStatus(sessionId) — lets the client decide fresh vs. resume.
+ */
 export async function getSessionStatus(sessionId) {
   const sid = sessionId || activeSessionId;
   if (sessionId) setActiveSession(sessionId);
   await initializeServices();
-
-  await getSessionEntry(sid);
 
   const states = getActiveStates();
   getState();
@@ -1268,8 +1142,8 @@ export async function getSessionStatus(sessionId) {
 
 export async function endSession(sessionId) {
   const sid = sessionId || activeSessionId;
-  sessionCache.delete(sid);
-  try { await store.deleteSession(sid); } catch (e) { /* ignore */ }
+  sessionStates.delete(sid);
+  sessionAwaitingAnswer.delete(sid);
   return { ok: true, sessionId: sid };
 }
 
@@ -1302,7 +1176,6 @@ export const nlpProcessor = {
   chat,
   resume,
   processMessage,
-  processExtraction,
   init,
   getAvailableServices,
   getSessionStatus,

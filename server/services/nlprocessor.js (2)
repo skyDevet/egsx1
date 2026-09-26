@@ -1,24 +1,21 @@
 // ============================================================
-// nlprocessor.js - Server-side (Node.js)
-// Your full NLP core logic
+// nlprocessor.js - Server-side (Node.js local + Cloudflare Worker)
+// Session state persisted to Supabase via ./sessionStore.js
 // ============================================================
 
 import { vinDecoder } from './vinDecoder.js';
 import { getServiceConfigDB } from './serviceConfigDB.js';
 import { executeStepApiActions, executeFieldApiActions } from './apiTasks.js';
+import { detectIntent } from './intent.js';
+import * as store from './sessionStore.js';
 
 // ============================================================
-// LANGUAGE (server-side, no localStorage)
+// LANGUAGE
 // ============================================================
 let currentLanguage = 'en';
 
-function getLanguage() {
-  return currentLanguage;
-}
-
-function setLanguage(lang) {
-  currentLanguage = lang === 'am' ? 'am' : 'en';
-}
+function getLanguage() { return currentLanguage; }
+function setLanguage(lang) { currentLanguage = lang === 'am' ? 'am' : 'en'; }
 
 function getLocalized(obj) {
   if (!obj) return '';
@@ -41,7 +38,7 @@ function getLocalizedOptions(optionsObj) {
 }
 
 // ============================================================
-// DEFAULT SERVICES
+// DEFAULT SERVICES (seed / fallback)
 // ============================================================
 const DEFAULT_SERVICES = {
   iftms: {
@@ -184,32 +181,74 @@ const DEFAULT_SERVICES = {
 };
 
 // ============================================================
-// STATE (server-side, in-memory; per-session keyed by sessionId)
+// STATE (in-memory cache + Supabase persistence)
 // ============================================================
 let currentService = 'iftms';
 let services = {};
 let servicesInitialized = false;
 let db = null;
 
-// Per-session service states: Map<sessionId, Map<serviceId, state>>
-const sessionStates = new Map();
+// Per-session cache entry: { states: { [serviceId]: state }, awaiting: { serviceId, since } | null }
+const sessionCache = new Map();
 
-function getSessionStates(sessionId) {
-  if (!sessionStates.has(sessionId)) {
-    sessionStates.set(sessionId, {});
-  }
-  return sessionStates.get(sessionId);
+let activeSessionId = 'default';
+function setActiveSession(sessionId) { if (sessionId) activeSessionId = sessionId; }
+
+// ---------- cache/session helpers ----------
+async function getSessionEntry(sessionId) {
+  const sid = sessionId || activeSessionId;
+  if (sessionCache.has(sid)) return sessionCache.get(sid);
+
+  const loaded = await store.loadSession(sid);
+  const entry = {
+    states: loaded?.state || {},
+    awaiting: loaded?.awaiting || null
+  };
+  sessionCache.set(sid, entry);
+  return entry;
 }
 
-// For backward-compat with the original single-session logic, we keep a default session
-let activeSessionId = 'default';
+function getSessionEntrySync(sessionId) {
+  const sid = sessionId || activeSessionId;
+  if (!sessionCache.has(sid)) {
+    sessionCache.set(sid, { states: {}, awaiting: null });
+  }
+  return sessionCache.get(sid);
+}
 
-function setActiveSession(sessionId) {
-  if (sessionId) activeSessionId = sessionId;
+function persistSession(sessionId, { immediate = false } = {}) {
+  const sid = sessionId || activeSessionId;
+  const entry = sessionCache.get(sid);
+  if (!entry) return;
+  store.saveSession(sid, { state: entry.states, awaiting: entry.awaiting }, { immediate });
+}
+
+function getSessionStates(sessionId) {
+  return getSessionEntrySync(sessionId).states;
 }
 
 function getActiveStates() {
   return getSessionStates(activeSessionId);
+}
+
+function markAwaitingAnswer(sessionId, serviceId) {
+  const sid = sessionId || activeSessionId;
+  const entry = getSessionEntrySync(sid);
+  entry.awaiting = { serviceId, since: Date.now() };
+  persistSession(sid);
+}
+
+function clearAwaitingAnswer(sessionId) {
+  const sid = sessionId || activeSessionId;
+  const entry = getSessionEntrySync(sid);
+  entry.awaiting = null;
+  persistSession(sid);
+}
+
+function isAwaitingAnswer(sessionId) {
+  const sid = sessionId || activeSessionId;
+  const entry = getSessionEntrySync(sid);
+  return !!entry.awaiting;
 }
 
 // ============================================================
@@ -218,53 +257,73 @@ function getActiveStates() {
 async function initializeServices() {
   if (servicesInitialized) return true;
   try {
-    console.log('📂 Initializing services...');
+    console.log('📂 Initializing services from Supabase...');
     db = await getServiceConfigDB();
+
+    try {
+      const seed = await db.seedDefaultServices?.('if-empty');
+      if (seed?.inserted > 0) console.log(`🌱 Seeded ${seed.inserted} service(s)`);
+      else if (seed?.skipped) console.log(`🌱 Supabase already has ${seed.skipped} service(s)`);
+    } catch (seedErr) {
+      console.warn('⚠️ Seed skipped:', seedErr.message);
+    }
+
     const dbConfigs = await db.getAllServiceConfigs();
+    services = {};
+
     if (dbConfigs && dbConfigs.length > 0) {
       for (const dbConfig of dbConfigs) {
-        if (dbConfig.isActive !== false) {
-          const service = {
-            id: dbConfig.serviceId,
-            name: dbConfig.name,
-            description: dbConfig.description,
-            initStep: dbConfig.initStep || 1,
-            collectedData: dbConfig.collectedData || {},
-            steps: dbConfig.steps || {}
-          };
-          if (service && service.id) services[service.id] = service;
-        }
-      }
-    }
-    if (Object.keys(services).length === 0) {
-      console.log('📂 Populating with default services...');
-      for (const [id, service] of Object.entries(DEFAULT_SERVICES)) {
-        const dbConfig = {
-          id: `${id}_v1`,
-          serviceId: id,
-          name: service.name,
-          description: service.description,
-          initStep: service.initStep,
-          collectedData: service.collectedData,
-          steps: service.steps,
-          isActive: true,
-          version: 1,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString()
+        if (dbConfig.isActive === false) continue;
+        const service = {
+          id: dbConfig.serviceId,
+          name: dbConfig.name,
+          description: dbConfig.description,
+          initStep: dbConfig.initStep || 1,
+          collectedData: dbConfig.collectedData || {},
+          steps: dbConfig.steps || {}
         };
-        await db.saveServiceConfig(dbConfig);
-        services[id] = service;
+        if (service.id && Object.keys(service.steps).length > 0) services[service.id] = service;
       }
     }
+
+    if (Object.keys(services).length === 0) {
+      console.warn('⚠️ Falling back to DEFAULT_SERVICES');
+      services = { ...DEFAULT_SERVICES };
+    }
+
+    if (!services[currentService]) {
+      const keys = Object.keys(services);
+      if (keys.length > 0) currentService = keys[0];
+    }
+
     servicesInitialized = true;
-    console.log(`📚 Services initialized: ${Object.keys(services).length} available`);
+    console.log(`📚 Services initialized: ${Object.keys(services).length}`);
     return true;
   } catch (error) {
-    console.error('❌ Error initializing services:', error);
+    console.error('❌ Init error:', error.message);
     services = { ...DEFAULT_SERVICES };
     servicesInitialized = true;
     return true;
   }
+}
+
+export async function reloadServices() {
+  servicesInitialized = false;
+  return await initializeServices();
+}
+
+export async function watchServiceConfigs(onChange) {
+  await initializeServices();
+  if (!db || typeof db.subscribe !== 'function') {
+    console.warn('⚠️ Realtime not available');
+    return () => {};
+  }
+  return db.subscribe(async (payload) => {
+    try {
+      await reloadServices();
+      if (typeof onChange === 'function') onChange(payload);
+    } catch (e) { console.error('Reload failed:', e.message); }
+  });
 }
 
 // ============================================================
@@ -319,9 +378,7 @@ function getCurrentField() {
 
 function isServiceComplete(serviceId) {
   const states = getActiveStates();
-  const state = states[serviceId];
-  if (!state) return false;
-  return state.isComplete === true;
+  return states[serviceId]?.isComplete === true;
 }
 
 function markServiceComplete(serviceId) {
@@ -330,9 +387,7 @@ function markServiceComplete(serviceId) {
     const svc = services[serviceId];
     states[serviceId] = {
       currentStep: svc?.initStep || 1,
-      currentFieldIndex: 0,
-      waitingForAdd: false,
-      waitingForContinue: false,
+      currentFieldIndex: 0, waitingForAdd: false, waitingForContinue: false,
       currentItem: {},
       collectedData: JSON.parse(JSON.stringify(svc?.collectedData || {})),
       isComplete: true
@@ -348,9 +403,7 @@ function resetService(serviceId) {
   const states = getActiveStates();
   states[serviceId] = {
     currentStep: svc.initStep || 1,
-    currentFieldIndex: 0,
-    waitingForAdd: false,
-    waitingForContinue: false,
+    currentFieldIndex: 0, waitingForAdd: false, waitingForContinue: false,
     currentItem: {},
     collectedData: JSON.parse(JSON.stringify(svc.collectedData || {})),
     isComplete: false
@@ -404,11 +457,8 @@ function validateField(input, field) {
 
   if (field.regex) {
     const re = new RegExp(field.regex, 'i');
-    if (!re.test(value)) {
-      return { valid: false, message: errorMsg || `Invalid. Example: ${exampleMsg}` };
-    }
+    if (!re.test(value)) return { valid: false, message: errorMsg || `Invalid. Example: ${exampleMsg}` };
   }
-
   return { valid: true, value };
 }
 
@@ -425,7 +475,7 @@ function saveToState(fieldName, value) {
 }
 
 // ============================================================
-// VIN PROCESSING
+// VIN
 // ============================================================
 function processVIN(input) {
   try {
@@ -441,7 +491,7 @@ function processVIN(input) {
     if (typeof vinDecoder.getCompleteVehicleData !== 'function') return null;
     return vinDecoder.getCompleteVehicleData(vin);
   } catch (error) {
-    console.error('VIN processing error:', error);
+    console.error('VIN error:', error);
     return null;
   }
 }
@@ -510,24 +560,16 @@ async function stepIntro() {
 async function buildComplete() {
   const state = getState();
   const svc = getService();
-  const lang = getLanguage();
-  const isAmharic = lang === 'am';
+  const isAmharic = getLanguage() === 'am';
 
   if (!isServiceComplete(currentService)) {
     const step = getStep();
-    if (step) {
-      const title = getLocalized(step.title);
-      const prompt = getLocalized(step.prompt);
-      const notCompleteMsg = getLocalized({ en: 'This service is not yet complete. Please continue with the registration.', am: 'ይህ አገልግሎት እስካሁን አልተጠናቀቀም። እባክዎ ምዝገባውን ይቀጥሉ።' });
-      return {
-        text: `${notCompleteMsg}\n\n${title}: ${prompt || ''}`,
-        html: `<div>${notCompleteMsg}<br><br><strong>${title}</strong><br>${prompt || ''}</div>`,
-        isStructured: true
-      };
-    }
+    const title = step ? getLocalized(step.title) : '';
+    const prompt = step ? getLocalized(step.prompt) : '';
+    const notCompleteMsg = getLocalized({ en: 'This service is not yet complete. Please continue.', am: 'ይህ አገልግሎት እስካሁን አልተጠናቀቀም። እባክዎ ይቀጥሉ።' });
     return {
-      text: getLocalized({ en: 'Service not complete. Please continue.', am: 'አገልግሎት አልተጠናቀቀም። እባክዎ ይቀጥሉ።' }),
-      html: `<div>${getLocalized({ en: 'Service not complete. Please continue.', am: 'አገልግሎት አልተጠናቀቀም። እባክዎ ይቀጥሉ።' })}</div>`,
+      text: `${notCompleteMsg}\n\n${title}: ${prompt || ''}`,
+      html: `<div>${notCompleteMsg}<br><br><strong>${title}</strong><br>${prompt || ''}</div>`,
       isStructured: true
     };
   }
@@ -586,10 +628,7 @@ async function executeAction(action, rawValue, originalMessage) {
           return { text: `${received} ${originalMessage}`, html: `<div>${received} ${originalMessage}</div>`, isStructured: true };
         }
 
-        // VIN auto-fill branch
         if (currentField.name === 'vinNumber' || currentField.name === 'chassisNumber') {
-          console.log('🔍 Processing VIN field with input:', originalMessage);
-
           if (currentField.apiActions && currentField.apiActions.length > 0) {
             const context = {
               userInput: originalMessage,
@@ -601,8 +640,7 @@ async function executeAction(action, rawValue, originalMessage) {
             const apiResult = await executeFieldApiActions(currentField, context);
             if (apiResult.success && apiResult.message) {
               if (apiResult.result?.data) {
-                const autoFillData = apiResult.result.data;
-                for (const [key, value] of Object.entries(autoFillData)) {
+                for (const [key, value] of Object.entries(apiResult.result.data)) {
                   if (value && value !== 'Unknown') saveToState(key, value);
                 }
               }
@@ -627,7 +665,7 @@ async function executeAction(action, rawValue, originalMessage) {
             for (const field of fields) {
               if (isAutoFillField(field)) {
                 const fieldValue = vinResult[field.name];
-                if (fieldValue && fieldValue !== 'Unknown' && fieldValue !== '' && fieldValue !== null && fieldValue !== undefined) {
+                if (fieldValue && fieldValue !== 'Unknown' && fieldValue !== '' && fieldValue != null) {
                   saveToState(field.name, fieldValue);
                   state.currentFieldIndex++;
                   autoFilledCount++;
@@ -798,9 +836,7 @@ async function executeAction(action, rawValue, originalMessage) {
           if (!states[target]) {
             states[target] = {
               currentStep: services[target].initStep || 1,
-              currentFieldIndex: 0,
-              waitingForAdd: false,
-              waitingForContinue: false,
+              currentFieldIndex: 0, waitingForAdd: false, waitingForContinue: false,
               currentItem: {},
               collectedData: JSON.parse(JSON.stringify(services[target].collectedData || {})),
               isComplete: false
@@ -835,8 +871,7 @@ async function executeAction(action, rawValue, originalMessage) {
           .filter(([, v]) => v && (Array.isArray(v) ? v.length > 0 : Object.keys(v).length > 0))
           .map(([k, v]) => {
             const label = getLanguage() === 'am' ?
-              { operator: 'ኦፕሬተር', vehicles: 'ተሽከርካሪዎች', drivers: 'አሽከርካሪዎች' }[k] || k :
-              k;
+              { operator: 'ኦፕሬተር', vehicles: 'ተሽከርካሪዎች', drivers: 'አሽከርካሪዎች' }[k] || k : k;
             return `${label}: ${Array.isArray(v) ? v.length + ' item(s)' : '✓'}`;
           })
           .join(', ') || getLocalized({ en: 'nothing yet', am: 'እስካሁን ምንም' });
@@ -851,6 +886,17 @@ async function executeAction(action, rawValue, originalMessage) {
         return {
           text: `${serviceLabel}: ${serviceName} | ${stepLabel}: ${state.currentStep} | ${collectedLabel}: ${collected} | ${completeStatus}`,
           html: `<div>📊 <strong>${serviceName}</strong><br>${stepLabel}: ${state.currentStep}<br>${collectedLabel}: ${collected}<br>${completeStatus}</div>`,
+          isStructured: true
+        };
+      }
+
+      case 'reset': {
+        resetService(currentService);
+        const resetMsg = getLocalized({ en: 'Session reset. Starting fresh.', am: 'ክፍለ ጊዜ ተጠርጓል። እንደገና በመጀመር ላይ።' });
+        const intro = await stepIntro();
+        return {
+          text: `${resetMsg}\n\n${intro.text}`,
+          html: `<div class="success">🔄 ${resetMsg}</div>${intro.html}`,
           isStructured: true
         };
       }
@@ -875,7 +921,7 @@ async function executeAction(action, rawValue, originalMessage) {
     const defaultPrompt = getLocalized(getStep()?.prompt) || getLocalized({ en: 'How can I help?', am: 'እንዴት ልረዳ?' });
     return { text: defaultPrompt, html: `<div>${defaultPrompt}</div>`, isStructured: true };
   } catch (error) {
-    console.error('❌ Error in executeAction:', error);
+    console.error('❌ executeAction error:', error);
     const errorLabel = getLocalized({ en: 'Error:', am: 'ስህተት:' });
     const unknownError = getLocalized({ en: 'Unknown error', am: 'ያልታወቀ ስህተት' });
     return {
@@ -890,9 +936,9 @@ async function executeAction(action, rawValue, originalMessage) {
 // PROCESS MESSAGE
 // ============================================================
 export async function processMessage(message, file) {
+  const sid = activeSessionId;
   try {
     console.log('📨 Processing:', message || '[file]');
-
     await initializeServices();
 
     if (file) {
@@ -916,6 +962,32 @@ export async function processMessage(message, file) {
 
     if (!message) return await stepIntro();
 
+    const state = getState();
+
+    if (state.waitingForAdd || state.waitingForContinue) {
+      const yesno = checkYesNo(message);
+      if (yesno) return await executeAction(yesno, null, message);
+    }
+
+    const vinPattern = /^[A-HJ-NPR-Z0-9]{10,18}$/i;
+    if (vinPattern.test(message.trim())) {
+      const currentField = getCurrentField();
+      if (currentField && (currentField.name === 'vinNumber' || currentField.name === 'chassisNumber')) {
+        return await executeAction('save', message, message);
+      }
+    }
+
+    try {
+      const intentResult = detectIntent(message);
+      if (intentResult) {
+        if (intentResult.intent === 'help')   return await executeAction('help', null, message);
+        if (intentResult.intent === 'status') return await executeAction('status', null, message);
+        if (intentResult.intent === 'reset')  return await executeAction('reset', null, message);
+      }
+    } catch (intentErr) {
+      console.warn('detectIntent failed:', intentErr.message);
+    }
+
     const switchTarget = checkServiceSwitch(message);
     if (switchTarget && switchTarget !== currentService && services[switchTarget]) {
       currentService = switchTarget;
@@ -923,9 +995,7 @@ export async function processMessage(message, file) {
       if (!states[switchTarget]) {
         states[switchTarget] = {
           currentStep: services[switchTarget].initStep || 1,
-          currentFieldIndex: 0,
-          waitingForAdd: false,
-          waitingForContinue: false,
+          currentFieldIndex: 0, waitingForAdd: false, waitingForContinue: false,
           currentItem: {},
           collectedData: JSON.parse(JSON.stringify(services[switchTarget].collectedData || {})),
           isComplete: false
@@ -943,32 +1013,6 @@ export async function processMessage(message, file) {
       };
     }
 
-    const state = getState();
-    if (state.waitingForAdd || state.waitingForContinue) {
-      const yesno = checkYesNo(message);
-      if (yesno) return await executeAction(yesno, null, message);
-    }
-
-    const vinPattern = /^[A-HJ-NPR-Z0-9]{10,18}$/i;
-    if (message && vinPattern.test(message.trim())) {
-      const currentField = getCurrentField();
-      if (currentField && (currentField.name === 'vinNumber' || currentField.name === 'chassisNumber')) {
-        return await executeAction('save', message, message);
-      }
-    }
-
-    const msgLower = message.toLowerCase();
-    if (msgLower.includes('help') || msgLower.includes('what can you do') || msgLower.includes('እገዛ')) {
-      return await executeAction('help', null, message);
-    }
-    if (msgLower.includes('status') || msgLower.includes('progress') || msgLower.includes('ሁኔታ')) {
-      return await executeAction('status', null, message);
-    }
-    if (msgLower.includes('complete') || msgLower.includes('done') || msgLower.includes('finish') || msgLower.includes('ተጠናቀቀ')) {
-      return await executeAction('complete', null, message);
-    }
-
-    // No model worker — treat as save on current field
     const currentField = getCurrentField();
     if (currentField) {
       const validation = validateField(message, currentField);
@@ -991,7 +1035,7 @@ export async function processMessage(message, file) {
       isStructured: true
     };
   } catch (error) {
-    console.error('❌ Error:', error);
+    console.error('❌ processMessage error:', error);
     const errorLabel = getLocalized({ en: 'Error:', am: 'ስህተት:' });
     const unknownError = getLocalized({ en: 'Unknown error', am: 'ያልታወቀ ስህተት' });
     return {
@@ -999,19 +1043,69 @@ export async function processMessage(message, file) {
       html: `<div class="error">❌ ${errorLabel} ${error.message || unknownError}</div>`,
       isStructured: true
     };
+  } finally {
+    // Persist state after every processed message
+    try { persistSession(sid); } catch (e) { /* ignore */ }
   }
 }
 
 // ============================================================
 // PUBLIC API
 // ============================================================
-export async function chat(msg, file, sessionId) {
+
+export async function chat(msg, file, sessionId, mode = 'chat', serviceId = null) {
   try {
+    const sid = sessionId || activeSessionId;
     if (sessionId) setActiveSession(sessionId);
     await initializeServices();
+
+    // Hydrate from Supabase if this session isn't in cache
+    await getSessionEntry(sid);
+
+    // ----- STAGE -----
+    if (mode === 'stage') {
+      if (serviceId && services[serviceId]) {
+        currentService = serviceId;
+        const states = getActiveStates();
+        if (!states[serviceId] || states[serviceId].isComplete) {
+          states[serviceId] = {
+            currentStep: services[serviceId].initStep || 1,
+            currentFieldIndex: 0,
+            waitingForAdd: false,
+            waitingForContinue: false,
+            currentItem: {},
+            collectedData: JSON.parse(JSON.stringify(services[serviceId].collectedData || {})),
+            isComplete: false
+          };
+        }
+      } else {
+        getState();
+      }
+      markAwaitingAnswer(sid, currentService);
+      return await stepIntro();
+    }
+
+    // ----- Auto-promote chat → answer when mid-flow -----
+    const states = getActiveStates();
+    getState();
+    const svcState = states[currentService];
+    const midFlow =
+      svcState &&
+      !svcState.isComplete &&
+      (isAwaitingAnswer(sid) ||
+        svcState.waitingForAdd ||
+        svcState.waitingForContinue ||
+        svcState.currentFieldIndex > 0);
+
+    if (mode === 'chat' && !file && midFlow) {
+      mode = 'answer';
+    }
+
+    if (msg || file) clearAwaitingAnswer(sid);
+
     return await processMessage(msg, file);
   } catch (error) {
-    console.error('❌ Chat error:', error);
+    console.error('❌ chat error:', error);
     const errorLabel = getLocalized({ en: 'Error:', am: 'ስህተት:' });
     const unknownError = getLocalized({ en: 'Unknown error', am: 'ያልታወቀ ስህተት' });
     return {
@@ -1022,12 +1116,88 @@ export async function chat(msg, file, sessionId) {
   }
 }
 
+export async function resume(sessionId) {
+  try {
+    const sid = sessionId || activeSessionId;
+    if (sessionId) setActiveSession(sessionId);
+    await initializeServices();
+
+    // Hydrate from Supabase
+    await getSessionEntry(sid);
+
+    const states = getActiveStates();
+    getState();
+
+    const svcState = states[currentService];
+    const step = getStep();
+
+    markAwaitingAnswer(sid, currentService);
+
+    if (svcState?.waitingForAdd && step?.subprocess?.addPrompt) {
+      const p = getLocalized(step.subprocess.addPrompt);
+      return { text: p, html: `<div>${p}</div>`, isStructured: true };
+    }
+    if (svcState?.waitingForContinue && step?.subprocess?.continuePrompt) {
+      const p = getLocalized(step.subprocess.continuePrompt);
+      return { text: p, html: `<div>${p}</div>`, isStructured: true };
+    }
+    return await stepIntro();
+  } catch (error) {
+    console.error('❌ resume error:', error);
+    const errorLabel = getLocalized({ en: 'Error:', am: 'ስህተት:' });
+    return {
+      text: `${errorLabel} ${error.message}`,
+      html: `<div class="error">❌ ${errorLabel} ${error.message}</div>`,
+      isStructured: true
+    };
+  }
+}
+
+export async function getSessionStatus(sessionId) {
+  const sid = sessionId || activeSessionId;
+  if (sessionId) setActiveSession(sessionId);
+  await initializeServices();
+
+  // Hydrate from Supabase
+  await getSessionEntry(sid);
+
+  const states = getActiveStates();
+  getState();
+
+  const svcState = states[currentService];
+  const svc = services[currentService];
+
+  return {
+    sessionId: sid,
+    serviceId: currentService,
+    serviceName: svc ? getLocalized(svc.name) : null,
+    currentStep: svcState?.currentStep ?? null,
+    currentFieldIndex: svcState?.currentFieldIndex ?? 0,
+    waitingForAdd: !!svcState?.waitingForAdd,
+    waitingForContinue: !!svcState?.waitingForContinue,
+    isComplete: !!svcState?.isComplete,
+    awaitingAnswer: isAwaitingAnswer(sid),
+    hasProgress: !!svcState && (
+      svcState.currentStep > (svc?.initStep || 1) ||
+      svcState.currentFieldIndex > 0 ||
+      svcState.waitingForAdd ||
+      svcState.waitingForContinue
+    )
+  };
+}
+
+export async function endSession(sessionId) {
+  const sid = sessionId || activeSessionId;
+  sessionCache.delete(sid);
+  try { await store.deleteSession(sid); } catch (e) { /* ignore */ }
+  return { ok: true, sessionId: sid };
+}
+
 export async function init() {
   try {
     await initializeServices();
     const serviceList = Object.keys(services);
-    console.log(`✅ NLP Processor initialized with ${serviceList.length} services`);
-    console.log('📚 Services:', serviceList);
+    console.log(`✅ NLP Processor initialized: ${serviceList.length} services`);
     return true;
   } catch (error) {
     console.error('❌ Init error:', error);
@@ -1050,12 +1220,17 @@ export {
 
 export const nlpProcessor = {
   chat,
+  resume,
   processMessage,
   init,
   getAvailableServices,
+  getSessionStatus,
+  endSession,
   resetService,
   isServiceComplete,
   markServiceComplete,
   setLanguage,
-  getLanguage
+  getLanguage,
+  reloadServices,
+  watchServiceConfigs
 };

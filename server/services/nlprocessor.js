@@ -188,13 +188,11 @@ let services = {};
 let servicesInitialized = false;
 let db = null;
 
-// Per-session cache entry: { states: { [serviceId]: state }, awaiting: { serviceId, since } | null }
 const sessionCache = new Map();
 
 let activeSessionId = 'default';
 function setActiveSession(sessionId) { if (sessionId) activeSessionId = sessionId; }
 
-// ---------- cache/session helpers ----------
 async function getSessionEntry(sessionId) {
   const sid = sessionId || activeSessionId;
   if (sessionCache.has(sid)) return sessionCache.get(sid);
@@ -1044,11 +1042,116 @@ export async function processMessage(message, file) {
       isStructured: true
     };
   } finally {
-    // Persist state after every processed message
     try { persistSession(sid); } catch (e) { /* ignore */ }
   }
 }
 
+// ============================================================
+// PROCESS EXTRACTION  (new — entry point for mode:'document')
+// ============================================================
+export async function processExtractionX(extracted, meta = {}, sessionId) {
+  const sid = sessionId || activeSessionId;
+  if (sessionId) setActiveSession(sessionId);
+  await initializeServices();
+
+  console.log('📄 processExtraction:', {
+    sessionId: sid,
+    serviceId: currentService,
+    documentType: meta?.documentType,
+    language: meta?.language,
+    fieldCount: extracted ? Object.keys(extracted).length : 0,
+  });
+
+  const state = getState();
+  state.collectedData = state.collectedData || {};
+  state.collectedData.extraction = {
+    fields: extracted || {},
+    meta: meta || {},
+    receivedAt: new Date().toISOString()
+  };
+
+  // If we're sitting on a file_upload step, advance past it.
+  const step = getStep();
+  if (step && step.type === 'file_upload') {
+    state.currentStep = step.onValid?.nextStep || state.currentStep + 1;
+    state.currentFieldIndex = 0;
+  }
+
+  // Pre-fill the current field if the extracted payload has a matching key.
+  const currentField = getCurrentField();
+  if (currentField && extracted && extracted[currentField.name] != null) {
+    const value = extracted[currentField.name];
+    saveToState(currentField.name, value);
+    state.currentFieldIndex++;
+    console.log(`  ✅ pre-filled ${currentField.name} = ${value}`);
+  }
+
+  try { persistSession(sid); } catch (e) { /* ignore */ }
+
+  const fieldCount = extracted ? Object.keys(extracted).length : 0;
+  const docType = meta?.documentType || 'Document';
+
+  return {
+    text: `Extraction received: ${docType} (${fieldCount} field${fieldCount === 1 ? '' : 's'})`,
+    html: `<div>📄 <strong>${docType}</strong><br>Extracted ${fieldCount} field${fieldCount === 1 ? '' : 's'}</div>`,
+    isStructured: true,
+    extracted: extracted || {},
+    extractionMeta: meta || {},
+    serviceId: currentService
+  };
+}
+
+// ============================================================
+// PROCESS EXTRACTION — thin adapter
+// Converts the client's extracted document payload into the
+// message text that the normal chat pipeline consumes, then
+// routes it through chat() so all step logic, validation,
+// service config, and intent handling apply unchanged.
+// ============================================================
+export async function processExtractionY(extracted, meta = {}, sessionId) {
+  const lines = Object.entries(extracted || {})
+    .map(([k, v]) => `${k}: ${v}`)
+    .join('\n');
+
+  const message = lines || `no fields extracted from ${meta?.documentType || 'document'}`;
+
+  return chat(message, null, sessionId, 'answer', null);
+}
+
+export async function processExtractionz(extracted, meta = {}, sessionId) {
+  const sid = sessionId || activeSessionId;
+  if (sessionId) setActiveSession(sessionId);
+  await initializeServices();
+  await getSessionEntry(sid);
+
+  const lines = Object.entries(extracted || {})
+    .map(([k, v]) => `${k}: ${v}`)
+    .join('\n');
+
+  const message = lines || `no fields extracted from ${meta?.documentType || 'document'}`;
+
+  // Save + restore awaiting around the call so chat()'s clear
+  // doesn't leak out to the DB.
+  const entry = getSessionEntrySync(sid);
+  const savedAwaiting = entry.awaiting;
+
+  const response = await processMessage(message, null);
+
+  entry.awaiting = savedAwaiting;
+  try { persistSession(sid); } catch { /* ignore */ }
+
+  return response;
+}
+
+export async function processExtraction(extracted, meta = {}, sessionId) {
+  const lines = Object.entries(extracted || {})
+    .map(([k, v]) => `${k}: ${v}`)
+    .join('\n');
+
+  const message = lines || `no fields extracted from ${meta?.documentType || 'document'}`;
+
+  return chat(message, null, sessionId, 'answer', null);
+}
 // ============================================================
 // PUBLIC API
 // ============================================================
@@ -1059,10 +1162,8 @@ export async function chat(msg, file, sessionId, mode = 'chat', serviceId = null
     if (sessionId) setActiveSession(sessionId);
     await initializeServices();
 
-    // Hydrate from Supabase if this session isn't in cache
     await getSessionEntry(sid);
 
-    // ----- STAGE -----
     if (mode === 'stage') {
       if (serviceId && services[serviceId]) {
         currentService = serviceId;
@@ -1085,7 +1186,6 @@ export async function chat(msg, file, sessionId, mode = 'chat', serviceId = null
       return await stepIntro();
     }
 
-    // ----- Auto-promote chat → answer when mid-flow -----
     const states = getActiveStates();
     getState();
     const svcState = states[currentService];
@@ -1122,7 +1222,6 @@ export async function resume(sessionId) {
     if (sessionId) setActiveSession(sessionId);
     await initializeServices();
 
-    // Hydrate from Supabase
     await getSessionEntry(sid);
 
     const states = getActiveStates();
@@ -1158,7 +1257,6 @@ export async function getSessionStatus(sessionId) {
   if (sessionId) setActiveSession(sessionId);
   await initializeServices();
 
-  // Hydrate from Supabase
   await getSessionEntry(sid);
 
   const states = getActiveStates();
@@ -1222,6 +1320,7 @@ export const nlpProcessor = {
   chat,
   resume,
   processMessage,
+  processExtraction,
   init,
   getAvailableServices,
   getSessionStatus,

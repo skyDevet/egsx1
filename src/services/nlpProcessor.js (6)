@@ -105,6 +105,8 @@ async function postJson(path, body) {
 // ============================================================
 // OPTIONAL DOCUMENT EXTRACTION (lazy-loaded)
 // ============================================================
+// This never breaks the build. If ./docExtractor.js is missing
+// or fails to load, we silently fall back to the normal flow.
 let _extractorModule = null;
 let _extractorLoadAttempted = false;
 
@@ -115,7 +117,7 @@ async function loadExtractor() {
     _extractorModule = await import('./docExtractor.js');
     console.log('[nlpProcessor] docExtractor loaded');
   } catch (e) {
-    console.warn('[nlpProcessor] docExtractor not available:', e.message);
+    console.warn('[nlpProcessor] docExtractor not available, skipping local extraction:', e.message);
     _extractorModule = null;
   }
   return _extractorModule;
@@ -124,8 +126,12 @@ async function loadExtractor() {
 export async function warmupDocExtractor() {
   const mod = await loadExtractor();
   if (mod && typeof mod.warmupDocExtractor === 'function') {
-    try { return await mod.warmupDocExtractor(); }
-    catch (e) { console.warn('[nlpProcessor] warmupDocExtractor failed:', e); return false; }
+    try {
+      return await mod.warmupDocExtractor();
+    } catch (e) {
+      console.warn('[nlpProcessor] warmupDocExtractor failed:', e);
+      return false;
+    }
   }
   return false;
 }
@@ -156,76 +162,20 @@ export async function init() {
   }
 }
 
-// ------------------------------------------------------------
-// sendExtraction(payload)
-// ------------------------------------------------------------
-// Sends ONLY the extracted document payload to the server —
-// no message string, no file object. Server treats this as a
-// document result and routes it into the normal chat pipeline.
-// ------------------------------------------------------------
-export async function sendExtraction(payload) {
-  return postJson('/chat', {
-    message: null,
-    file: null,
-    extracted: payload?.fields || null,
-    extractionMeta: {
-      source:        payload?.source || 'tess',
-      documentType:  payload?.documentType || 'General Document',
-      typeClass:     payload?.typeClass || 'type-other',
-      category:      payload?.category || 'other',
-      language:      payload?.language || 'unknown',
-      confidence:    payload?.confidence ?? 0,
-      ocrConfidence: payload?.ocrConfidence ?? 0,
-      raw:           payload?.raw ?? null,
-      text:          payload?.text ?? '',
-    },
-    sessionId,
-    mode: 'document',
-    serviceId: null,
-    language: currentLanguage,
-  });
-}
-
-// ------------------------------------------------------------
-// chat(msg, file, serviceHint)
-//
-// Dispatcher:
-//   • file present  → LOCAL extraction path. File never goes to
-//                     the server. fieldExtractor calls
-//                     sendExtraction(string) instead.
-//   • no file       → TEXT path. postJson('/chat') as usual.
-// ------------------------------------------------------------
+/**
+ * chat(msg, file, serviceHint)
+ *
+ *  serviceHint — canonical service id from a suggestion-card click.
+ *                Presence ⇒ mode = "stage" (present current step, no validation)
+ *  bare service name in text ⇒ mode = "stage"
+ *  otherwise ⇒ mode = "answer" (or "chat" if no service context)
+ *
+ * If `file` is provided AND docExtractor.js is available, run local
+ * YOLO+Tesseract extraction and attach `extracted` to the payload.
+ * If docExtractor.js is missing, this function behaves exactly as before.
+ */
 export async function chat(msg, file, serviceHint = null) {
-  // ---- FILE PATH ----
-  if (file) {
-    console.log('📎 [chat] file path → local extraction (file will NOT go to server)');
-
-    const result = await tryExtract(file);
-    console.log('📎 [chat] extractDocument result:', result);
-
-    if (result && result.nlpResponse) {
-      console.log('📎 [chat] returning extraction nlpResponse');
-      return result.nlpResponse;
-    }
-
-    if (result && result.fields && Object.keys(result.fields).length > 0) {
-      // Extraction happened but no server response attached — send it now.
-      try {
-        return await sendExtraction(result);
-      } catch (e) {
-        console.warn('📎 [chat] sendExtraction fallback failed:', e);
-      }
-    }
-
-    // No extraction available — return local acknowledgement, no server POST.
-    return {
-      text: 'File received locally. No fields extracted.',
-      isStructured: true,
-    };
-  }
-
-  // ---- TEXT PATH ----
-  if (isEmptyInput(msg) && !serviceHint) {
+  if (isEmptyInput(msg) && !file && !serviceHint) {
     console.log('⏭️ chat: empty, skipping');
     return null;
   }
@@ -235,21 +185,37 @@ export async function chat(msg, file, serviceHint = null) {
   const keywordService = !hintedService ? detectService(normalizedMsg) : null;
   const serviceId = hintedService || keywordService;
 
+  // ---- Decide mode ----
   let mode = 'chat';
-  if (serviceId) {
+  if (file) {
+    mode = 'answer';
+  } else if (serviceId) {
     const isStage = !!hintedService || isBareServiceName(normalizedMsg, serviceId);
     mode = isStage ? 'stage' : 'answer';
   }
 
+  // ---- Optional: local document extraction (browser only) ----
+  let extracted = null;
+  let extractionMeta = null;
+  if (file) {
+    const result = await tryExtract(file);
+    if (result && result.fields && Object.keys(result.fields).length > 0) {
+      extracted = result.fields;
+      extractionMeta = result.raw || null;
+      if (result.docType) mode = 'document';
+    }
+  }
+
+  // ---- Send to backend ----
   return postJson('/chat', {
     message: normalizedMsg,
-    file: null,
-    extracted: null,
-    extractionMeta: null,
+    file: file ? { name: file.name, size: file.size } : null,
+    extracted: extracted || null,
+    extractionMeta: extractionMeta || null,
     sessionId,
     mode,
     serviceId: serviceId || null,
-    language: currentLanguage,
+    language: currentLanguage
   });
 }
 
@@ -266,6 +232,7 @@ export async function stageService(serviceId) {
   });
 }
 
+// Explicit answer helper
 export async function sendAnswer(message) {
   return postJson('/chat', {
     message,
@@ -278,10 +245,11 @@ export async function sendAnswer(message) {
   });
 }
 
+// Free-form message
 export async function sendMessage(message, file = null) {
   return postJson('/chat', {
     message,
-    file: null,
+    file: file ? { name: file.name, size: file.size } : null,
     extracted: null,
     sessionId,
     mode: 'chat',
@@ -290,18 +258,22 @@ export async function sendMessage(message, file = null) {
   });
 }
 
+// Convenience wrapper: same as chat(null, file) but semantically explicit
 export async function chatWithDocument(file, serviceHint = null) {
   return chat(null, file, serviceHint);
 }
 
+// Resume after navigation / reload
 export async function resumeSession() {
   return postJson('/resume', { sessionId, language: currentLanguage });
 }
 
+// Ask server whether this session has unfinished work
 export async function fetchSessionStatus() {
   return postJson('/session-status', { sessionId });
 }
 
+// End the session
 export async function endSession() {
   try {
     await postJson('/end-session', { sessionId });
@@ -310,6 +282,7 @@ export async function endSession() {
   }
 }
 
+// Legacy alias kept so existing imports don't break
 export async function processMessage(msg, file, serviceHint) {
   return chat(msg, file, serviceHint);
 }
@@ -337,7 +310,6 @@ export function markServiceComplete() {}
 // ============================================================
 export const nlpProcessor = {
   chat,
-  sendExtraction,
   chatWithDocument,
   processMessage,
   stageService,

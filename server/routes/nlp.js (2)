@@ -18,29 +18,17 @@ const nlpLimiter = rateLimit({
 
 // ------------------------------------------------------------
 // POST /api/nlp/chat
-// Body: { message, file, sessionId, mode, serviceId, language,
-//         extracted, extractionMeta }
-// mode: "stage" | "answer" | "chat" | "document"
+// Body: { message, file, sessionId, mode, serviceId, language }
+// mode: "stage" | "answer" | "chat"
 // ------------------------------------------------------------
 router.post('/chat', nlpLimiter, async (req, res) => {
   try {
-    const {
-      message, text, file, sessionId,
-      mode = 'chat', serviceId = null, language,
-      extracted = null, extractionMeta = null
-    } = req.body;
-
+    const { message, text, file, sessionId, mode = 'chat', serviceId = null, language } = req.body;
     if (!sessionId) return res.status(400).json({ error: 'Missing sessionId' });
 
     const nlpProcessor = req.app.locals.nlpProcessor;
     if (!nlpProcessor) return res.status(500).json({ error: 'NLP processor not initialized' });
     if (language) nlpProcessor.setLanguage(language);
-
-    // ---- Dedicated document-extraction path ----
-   /* if (mode === 'document' && extracted) {
-      const result = await nlpProcessor.processExtraction(extracted, extractionMeta || {}, sessionId);
-      return res.json({ success: true, data: result, timestamp: Date.now() });
-    }*/
 
     // Accept both `message` (new client) and `text` (old client)
     const userText = message ?? text ?? null;

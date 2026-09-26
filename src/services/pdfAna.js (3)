@@ -1,0 +1,113 @@
+// src/services/pdfAna.js
+// PDF → text (via pdfjs-dist) → POST text to backend /chat as message.
+// No fieldExtractor. No classifyDocument. Server treats it as a typed message.
+
+import * as pdfjsLib from 'pdfjs-dist/build/pdf';
+import pdfjsWorker from 'pdfjs-dist/build/pdf.worker?url';
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
+
+const API_BASE = 'http://127.0.0.1:4000/api/nlp';
+const TAG = '[pdfAna]';
+const log   = (...a) => console.log(TAG, ...a);
+const warn  = (...a) => console.warn(TAG, ...a);
+const error = (...a) => console.error(TAG, ...a);
+
+function getSessionId() {
+  if (typeof localStorage === 'undefined') return null;
+  let sid = localStorage.getItem('nlp_session_id');
+  if (!sid) {
+    sid = 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+    localStorage.setItem('nlp_session_id', sid);
+  }
+  return sid;
+}
+
+// ------------------------------------------------------------
+// Extract text from a PDF file
+// ------------------------------------------------------------
+export async function extractTextFromPDF(file) {
+  return new Promise((resolve, reject) => {
+    const fileReader = new FileReader();
+
+    fileReader.onload = async function () {
+      try {
+        const typedArray = new Uint8Array(this.result);
+        const pdf = await pdfjsLib.getDocument(typedArray).promise;
+        let fullText = '';
+
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          const textContent = await page.getTextContent();
+          const pageText = textContent.items.map(item => item.str).join(' ');
+          fullText += pageText + '\n';
+        }
+
+        log(`✅ PDF text extracted: pages=${pdf.numPages} chars=${fullText.length}`);
+        resolve(fullText);
+      } catch (err) {
+        error('PDF text extraction failed:', err.message);
+        reject(err);
+      }
+    };
+
+    fileReader.onerror = reject;
+    fileReader.readAsArrayBuffer(file);
+  });
+}
+
+// ------------------------------------------------------------
+// POST extracted PDF text to backend as a plain chat message.
+// Same pipeline as typed text: mode 'answer', no extracted payload.
+// ------------------------------------------------------------
+export async function sendPDFToBackend(text, fileMeta = {}) {
+  const sessionId = getSessionId();
+  const safeText = (text || '').trim() ||
+    `PDF received (${fileMeta.fileName || 'unnamed'}), no text extracted.`;
+
+  const body = {
+    message: safeText,
+    file: null,
+    extracted: null,
+    extractionMeta: null,
+    sessionId,
+    mode: 'answer',
+    serviceId: null,
+    language: 'en',
+  };
+
+  log('📤 POST /chat — preview:', safeText.slice(0, 200) + (safeText.length > 200 ? '…' : ''));
+
+  const res = await fetch(`${API_BASE}/chat`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Session-ID': sessionId,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || err.error || `HTTP ${res.status}`);
+  }
+
+  const resBody = await res.json();
+  const data = resBody.data || resBody;
+  log('📥 response:', data);
+  return data;
+}
+
+// ------------------------------------------------------------
+// Extract + send in one call.
+// Returns { text, response } so docExtractor can forward nlpResponse.
+// ------------------------------------------------------------
+export async function analyzePDF(file) {
+  log('▶ analyzePDF:', file?.name, file?.size, 'bytes');
+  const text = await extractTextFromPDF(file);
+  const response = await sendPDFToBackend(text, {
+    fileName: file.name,
+    fileSize: file.size,
+  });
+  return { text, response };
+}
